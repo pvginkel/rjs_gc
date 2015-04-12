@@ -1,32 +1,48 @@
+const MAX_TIME : u64 = 200 * 1000000; // 100 ms
+const MAX_ALLOCS : usize = 1000;
+
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::ptr;
 use std::mem;
 use strategy::Strategy;
-use strategy::compacting::Compacting;
+use strategy::marksweep::MarkSweep;
+use time::precise_time_ns;
 
 mod os;
 mod strategy;
 
 extern crate libc;
+extern crate time;
+
+#[macro_export]
+macro_rules! field_offset {
+	( $ty:ty, $ident:ident ) => {
+		unsafe { ((&(& *(std::ptr::null::<$ty>() as *const $ty)).$ident) as *const GcPtr<_>) as usize }
+	}
+}
 
 unsafe fn as_mut<T>(obj: &T) -> &mut T {
 	&mut *((obj as *const T) as *mut T)
 }
 
+#[inline(always)]
 unsafe fn get_header<'a>(ptr: *const libc::c_void) -> &'a GcMemHeader {
 	mem::transmute(ptr)
 }
 
+#[inline(always)]
 unsafe fn get_data<'a, T : ?Sized>(ptr: *const libc::c_void) -> &'a T {
 	& *(ptr.offset(mem::size_of::<GcMemHeader>() as isize) as *const T)
 }
 
-unsafe fn get_header_mut<'a>(ptr: *mut libc::c_void) -> &'a mut GcMemHeader {
+#[inline(always)]
+unsafe fn get_header_mut<'a>(ptr: *const libc::c_void) -> &'a mut GcMemHeader {
 	mem::transmute(ptr)
 }
 
-unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *mut libc::c_void) -> &'a mut T {
+#[inline(always)]
+unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *const libc::c_void) -> &'a mut T {
 	&mut *(ptr.offset(mem::size_of::<GcMemHeader>() as isize) as *mut T)
 }
 
@@ -149,8 +165,33 @@ impl GcType {
 
 pub enum GcTypeLayout {
 	None,
-	Bitmap(Vec<u32>),
+	Bitmap(u64),
 	Callback(Box<Fn(usize, u32) -> GcTypeWalk>)
+}
+
+impl GcTypeLayout {
+	pub fn new_bitmap(size: usize, ptrs: Vec<usize>) -> GcTypeLayout {
+		// The bitmap is stored in an u64. This means we have 64 bits available.
+		// The bitmap is a bitmap of pointers, so this maps to size / sizeof(ptr).
+		// Assert that the size of the struct does not go over this.
+		
+		assert!(size / mem::size_of::<usize>() <= mem::size_of::<u64>() * 8);
+		
+		let mut bitmap = 0u64;
+		
+		for ptr in ptrs {
+			// ptr is a byte offset of the field into the structure. The bitmap is
+			// based on pointer size offsets, so we need to divide ptr by the pointer
+			// size. The bitmap itself is a n u64 so we have 64 bits available,
+			// which means we have room for 64 pointers per index.
+			
+			assert!((ptr % mem::size_of::<usize>()) == 0);
+			
+			bitmap |= 1u64 << (ptr / mem::size_of::<usize>());
+		}
+		
+		GcTypeLayout::Bitmap(bitmap)
+	}
 }
 
 pub enum GcTypeWalk {
@@ -209,8 +250,9 @@ pub struct GcHeap {
 	opts: GcOpts,
 	types: GcTypes,
 	handles: GcHandles,
-	memory: os::Memory,
-	gen1: Compacting
+	gen1: MarkSweep,
+	allocs: usize,
+	last_gc: u64
 }
 
 struct GcMemHeader {
@@ -224,18 +266,21 @@ impl GcMemHeader {
 		}
 	}
 	
+	#[inline(always)]
 	fn get_marked(&self) -> bool {
 		(self.header & 0x1) != 0
 	}
 	
-	fn set_marked(&mut self, marked: bool) {
-		if marked {
-			self.header |= 0x1;
-		} else {
-			self.header & !0x1;
-		}
+	#[inline(always)]
+	fn set_marked(&mut self) {
+		self.header |= 0x1;
 	}
 	
+	fn clear_marked(&mut self) {
+		self.header &= !0x1;
+	}
+	
+	#[inline(always)]
 	fn get_type_id(&self) -> GcTypeId {
 		GcTypeId((self.header >> 1) as u32)
 	}
@@ -247,8 +292,9 @@ impl GcHeap {
 			opts: opts,
 			types: GcTypes::new(),
 			handles: GcHandles::new(),
-			memory: os::Memory::alloc(4096).unwrap(),
-			gen1: Compacting::new()
+			gen1: MarkSweep::new(),
+			allocs: 0,
+			last_gc: precise_time_ns()
 		}
 	}
 	
@@ -257,9 +303,25 @@ impl GcHeap {
 	}
 	
 	unsafe fn alloc_raw(&mut self, size: usize) -> *mut libc::c_void {
+		self.allocs += 1;
+		
+		if self.allocs > MAX_ALLOCS {
+			self.allocs = 0;
+			
+			let time = precise_time_ns();
+			if time - self.last_gc > MAX_TIME {
+				self.gc();
+			}
+		} 
+		
 		let ptr = self.gen1.alloc_raw(size);
 		if ptr.is_null() {
-			panic!();
+			self.gc();
+			
+			let ptr = self.gen1.alloc_raw(size);
+			if ptr.is_null() {
+				panic!("Could not allocate memory after GC");
+			}
 		}
 		
 		ptr
@@ -286,5 +348,42 @@ impl GcHeap {
 	pub fn alloc_handle<T>(&self, type_id: GcTypeId, value: T) -> Gc<T> {
 		let pointer = self.alloc(type_id, value).ptr;
 		unsafe { as_mut(self) }.handles.add(self, pointer)
+	}
+	
+	pub fn gc(&self) {
+		let heap = unsafe { as_mut(self) };
+		
+		heap.last_gc = precise_time_ns();
+		heap.gen1.gc(&self.types, RootWalker {
+			handles: &self.handles,
+			offset: 0
+		});
+	}
+	
+	pub fn mem_allocated(&self) -> usize {
+		self.gen1.mem_allocated()
+	}
+	
+	pub fn mem_used(&self) -> usize {
+		self.gen1.mem_used()
+	}
+}
+
+struct RootWalker<'a> {
+	handles: &'a GcHandles,
+	offset: usize
+}
+
+impl<'a> RootWalker<'a> {
+	fn next(&mut self) -> *const libc::c_void {
+		for i in self.offset..self.handles.ptrs.len() {
+			let ptr = self.handles.ptrs[i];
+			if ptr != ptr::null_mut() {
+				self.offset = i + 1;
+				return ptr;
+			}
+		}
+		
+		ptr::null()
 	}
 }
