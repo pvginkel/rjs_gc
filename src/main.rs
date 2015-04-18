@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 #[macro_use]
-extern crate gc;
+extern crate rjs_gc;
 extern crate time;
 
-use gc::*;
+use rjs_gc::*;
 use std::mem;
 
 struct Stopwatch {
@@ -65,8 +65,8 @@ fn create_heap() -> (GcHeap, Types) {
 	);
 	
 	let types = Types {
-		id: heap.types().add(GcType::new(mem::size_of::<MyStruct>(), 0, GcTypeLayout::None)),
-		ref_id: heap.types().add(GcType::new(mem::size_of::<MyStructWithRef>(), 0, ref_bitmap))
+		id: heap.types().add(GcType::new(mem::size_of::<MyStruct>(), GcTypeLayout::None)),
+		ref_id: heap.types().add(GcType::new(mem::size_of::<MyStructWithRef>(), ref_bitmap))
 	};
 	
 	(heap, types)

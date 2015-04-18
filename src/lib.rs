@@ -152,15 +152,13 @@ impl GcTypes {
 
 pub struct GcType {
 	size: usize,
-	data: usize,
 	layout: GcTypeLayout
 }
 
 impl GcType {
-	pub fn new(size: usize, data: usize, layout: GcTypeLayout) -> GcType {
+	pub fn new(size: usize, layout: GcTypeLayout) -> GcType {
 		GcType {
 			size: size,
-			data: data,
 			layout: layout
 		}
 	}
