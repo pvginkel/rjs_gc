@@ -1,4 +1,4 @@
-pub mod marksweep;
+pub mod copying;
 
 extern crate libc;
 

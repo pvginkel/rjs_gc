@@ -87,12 +87,17 @@ pub struct Memory {
 	size: usize
 }
 
-
-
 impl Memory {
+	pub fn empty() -> Memory {
+		Memory {
+			ptr: ptr::null_mut(),
+			size: 0
+		}
+	}
+	
 	pub fn alloc(size: usize) -> Option<Memory> {
 		let ptr = unsafe { map(ptr::null(), size) };
-		if ptr == ptr::null_mut() {
+		if ptr.is_null() {
 			None
 		} else {
 			Some(Memory {
@@ -113,6 +118,8 @@ impl Memory {
 
 impl Drop for Memory {
 	fn drop(&mut self) {
-		unsafe { unmap(self.ptr, self.size) };
+		if self.size > 0 {
+			unsafe { unmap(self.ptr, self.size) };
+		}
 	}
 }

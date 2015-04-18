@@ -86,6 +86,7 @@ fn bench(msg: &str, callback: &Fn()) {
 }
 
 fn simple_allocs() {
+	/*
 	let (heap, types) = create_heap();
 	
 	let mut a = heap.alloc_handle(types.id, MyStruct {
@@ -117,14 +118,19 @@ fn simple_allocs() {
 //	println!("{} {} {}", b.a.a, b.a.b, b.a.c);
 	
 	print_stats(&heap);
+	*/
 }
 
 fn alloc_struct(heap: &GcHeap, types: &Types, a: i32, b: i32, c: i32) -> GcPtr<MyStruct> {
-	heap.alloc(types.id, MyStruct {
+	let mut result = heap.alloc(types.id);
+	
+	*result = MyStruct {
 		a: a,
 		b: b,
 		c: c
-	})
+	};
+	
+	result
 }
 
 fn large_allocs() {
@@ -133,10 +139,12 @@ fn large_allocs() {
 	let mut small = Vec::new();
 	
 	for _ in 0..400000 {
-		small.push(heap.alloc_handle(types.ref_id, MyStructWithRef {
-			a: alloc_struct(&heap, &types, 1, 2, 3),
-			b: alloc_struct(&heap, &types, 4, 5, 6)
-		}));
+		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+		
+		result.a = alloc_struct(&heap, &types, 1, 2, 3);
+		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		
+		small.push(Some(result));
 	}
 	
 //	println!("after init");
@@ -146,29 +154,50 @@ fn large_allocs() {
 	
 //	println!("after init gc");
 //	print_stats(&heap);
-	
+	/*
 	for i in 0..4000 {
-		small[i * 10] = heap.alloc_handle(types.ref_id, MyStructWithRef {
-			a: alloc_struct(&heap, &types, 1, 2, 3),
-			b: alloc_struct(&heap, &types, 4, 5, 6)
-		});
+		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+		
+		result.a = alloc_struct(&heap, &types, 1, 2, 3);
+		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		
+		small[i * 10] = result;
+	}
+	*/
+	for _ in 0..100 {
+		for i in 0..100 {
+			let mut offset = i;
+			let mut inc = 1;
+			
+			while offset < small.len() {
+				let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+			
+				result.a = alloc_struct(&heap, &types, 1, 2, 3);
+				result.b = alloc_struct(&heap, &types, 4, 5, 6);
+				
+				small[offset] = Some(result);
+				
+				offset += inc;
+				inc += 1;
+			}
+		}
 	}
 	
 //	println!("after replace");
 //	print_stats(&heap);
-	
+
 	heap.gc();
 	
 //	println!("after replace gc");
 //	print_stats(&heap);
 	
 	for i in (0..4000).rev() {
-		small.remove(i * 10);
+		small[i * 10] = None;
 	}
 	
 //	println!("after remove");
 //	print_stats(&heap);
-	
+
 	heap.gc();
 	
 //	println!("after remove gc");
@@ -182,10 +211,10 @@ fn many_allocs() {
 		print_stats(&heap);
 		
 		for _ in 0..400000 {
-			heap.alloc_handle(types.ref_id, MyStructWithRef {
-				a: alloc_struct(&heap, &types, 1, 2, 3),
-				b: alloc_struct(&heap, &types, 4, 5, 6)
-			});
+			let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+			
+			result.a = alloc_struct(&heap, &types, 1, 2, 3);
+			result.b = alloc_struct(&heap, &types, 4, 5, 6);
 		}
 	}
 	

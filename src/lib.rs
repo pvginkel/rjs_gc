@@ -1,13 +1,16 @@
-const MAX_TIME : u64 = 200 * 1000000; // 100 ms
-const MAX_ALLOCS : usize = 1000;
+// We can't use size_of in a static so we use conditional compilation instead.
+
+#[cfg(target_pointer_width = "32")]
+const PTR_SIZE : usize = 4;
+#[cfg(target_pointer_width = "64")]
+const PTR_SIZE : usize = 8;
 
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::ptr;
 use std::mem;
 use strategy::Strategy;
-use strategy::marksweep::MarkSweep;
-use time::precise_time_ns;
+use strategy::copying::Copying;
 
 mod os;
 mod strategy;
@@ -24,11 +27,6 @@ macro_rules! field_offset {
 
 unsafe fn as_mut<T>(obj: &T) -> &mut T {
 	&mut *((obj as *const T) as *mut T)
-}
-
-#[inline(always)]
-unsafe fn get_header<'a>(ptr: *const libc::c_void) -> &'a GcMemHeader {
-	mem::transmute(ptr)
 }
 
 #[inline(always)]
@@ -54,7 +52,10 @@ pub struct Gc<'a, T: ?Sized> {
 
 impl<'a, T: ?Sized> Gc<'a, T> {
 	pub fn as_ptr(&self) -> GcPtr<T> {
-		panic!();
+		GcPtr {
+			ptr: self.owner.handles.ptrs[self.handle as usize],
+			_type: PhantomData
+		}
 	}
 }
 
@@ -100,15 +101,17 @@ impl<T: ?Sized> DerefMut for GcPtr<T> {
 }
 
 pub struct GcOpts {
-	pub min_size: usize,
-	pub max_size: usize
+	pub initial_heap: usize,
+	pub slow_growth_factor: f64,
+	pub fast_growth_factor: f64
 }
 
 impl GcOpts {
 	pub fn default() -> GcOpts {
 		GcOpts {
-			min_size: 0,
-			max_size: 10 * 1024 * 1024
+			initial_heap: 16 * 1024 * 1024, // 16M
+			slow_growth_factor: 1.5f64,
+			fast_growth_factor: 3f64
 		}
 	}
 }
@@ -247,12 +250,9 @@ impl GcHandles {
 }
 
 pub struct GcHeap {
-	opts: GcOpts,
 	types: GcTypes,
 	handles: GcHandles,
-	gen1: MarkSweep,
-	allocs: usize,
-	last_gc: u64
+	heap: Copying
 }
 
 struct GcMemHeader {
@@ -262,39 +262,29 @@ struct GcMemHeader {
 impl GcMemHeader {
 	fn new(type_id: GcTypeId) -> GcMemHeader {
 		GcMemHeader {
-			header: type_id.usize() << 1
+			header: type_id.usize()
 		}
 	}
 	
 	#[inline(always)]
-	fn get_marked(&self) -> bool {
-		(self.header & 0x1) != 0
-	}
-	
-	#[inline(always)]
-	fn set_marked(&mut self) {
-		self.header |= 0x1;
-	}
-	
-	fn clear_marked(&mut self) {
-		self.header &= !0x1;
-	}
-	
-	#[inline(always)]
 	fn get_type_id(&self) -> GcTypeId {
-		GcTypeId((self.header >> 1) as u32)
+		GcTypeId(self.header as u32)
 	}
 }
 
 impl GcHeap {
 	pub fn new(opts: GcOpts) -> GcHeap {
+		if opts.fast_growth_factor <= 1f64 {
+			panic!("fast_growth_factor must be more than 1");
+		}
+		if opts.slow_growth_factor <= 1f64 {
+			panic!("slow_growth_factor must be more than 1");
+		}
+		
 		GcHeap {
-			opts: opts,
 			types: GcTypes::new(),
 			handles: GcHandles::new(),
-			gen1: MarkSweep::new(),
-			allocs: 0,
-			last_gc: precise_time_ns()
+			heap: Copying::new(opts)
 		}
 	}
 	
@@ -303,6 +293,7 @@ impl GcHeap {
 	}
 	
 	unsafe fn alloc_raw(&mut self, size: usize) -> *mut libc::c_void {
+		/*
 		self.allocs += 1;
 		
 		if self.allocs > MAX_ALLOCS {
@@ -313,12 +304,13 @@ impl GcHeap {
 				self.gc();
 			}
 		} 
+		*/
 		
-		let ptr = self.gen1.alloc_raw(size);
+		let mut ptr = self.heap.alloc_raw(size);
 		if ptr.is_null() {
 			self.gc();
 			
-			let ptr = self.gen1.alloc_raw(size);
+			ptr = self.heap.alloc_raw(size);
 			if ptr.is_null() {
 				panic!("Could not allocate memory after GC");
 			}
@@ -327,7 +319,7 @@ impl GcHeap {
 		ptr
 	}
 	
-	pub fn alloc<T>(&self, type_id: GcTypeId, value: T) -> GcPtr<T> {
+	pub fn alloc<T>(&self, type_id: GcTypeId) -> GcPtr<T> {
 		unsafe {
 			let ty = self.types.get(type_id);
 			
@@ -336,7 +328,6 @@ impl GcHeap {
 			let header = GcMemHeader::new(type_id);
 			
 			*get_header_mut(ptr) = header;
-			*get_data_mut(ptr) = value;
 			
 			GcPtr {
 				ptr: ptr,
@@ -345,45 +336,50 @@ impl GcHeap {
 		}
 	}
 	
-	pub fn alloc_handle<T>(&self, type_id: GcTypeId, value: T) -> Gc<T> {
-		let pointer = self.alloc(type_id, value).ptr;
+	pub fn alloc_handle<T>(&self, type_id: GcTypeId) -> Gc<T> {
+		let pointer = self.alloc::<T>(type_id).ptr;
 		unsafe { as_mut(self) }.handles.add(self, pointer)
 	}
 	
 	pub fn gc(&self) {
 		let heap = unsafe { as_mut(self) };
 		
-		heap.last_gc = precise_time_ns();
-		heap.gen1.gc(&self.types, RootWalker {
-			handles: &self.handles,
+		heap.heap.gc(&self.types, RootWalker {
+			handles: &mut heap.handles,
 			offset: 0
 		});
 	}
 	
 	pub fn mem_allocated(&self) -> usize {
-		self.gen1.mem_allocated()
+		self.heap.mem_allocated()
 	}
 	
 	pub fn mem_used(&self) -> usize {
-		self.gen1.mem_used()
+		self.heap.mem_used()
 	}
 }
 
 struct RootWalker<'a> {
-	handles: &'a GcHandles,
+	handles: &'a mut GcHandles,
 	offset: usize
 }
 
 impl<'a> RootWalker<'a> {
 	fn next(&mut self) -> *const libc::c_void {
-		for i in self.offset..self.handles.ptrs.len() {
-			let ptr = self.handles.ptrs[i];
-			if ptr != ptr::null_mut() {
-				self.offset = i + 1;
+		let end = self.handles.ptrs.len();
+		while self.offset < end {
+			let ptr = self.handles.ptrs[self.offset];
+			self.offset += 1;
+			
+			if !ptr.is_null() {
 				return ptr;
 			}
 		}
 		
 		ptr::null()
+	}
+	
+	fn rewrite(&mut self, ptr: *const libc::c_void) {
+		self.handles.ptrs[self.offset - 1] = ptr as *mut libc::c_void;
 	}
 }

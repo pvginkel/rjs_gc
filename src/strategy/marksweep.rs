@@ -2,19 +2,12 @@ extern crate libc;
 
 use super::Strategy;
 use super::super::os::Memory;
-use super::super::{RootWalker, GcTypes, GcTypeLayout, GcMemHeader, get_header_mut};
+use super::super::{RootWalker, GcTypes, GcTypeLayout, GcMemHeader, get_header_mut, PTR_SIZE};
 use libc::c_void;
 use std::ptr;
 use std::mem;
 
 static WORD_SIZE : usize = 8;
-
-// We can't use size_of in a static so we use conditional compilation instead.
-
-#[cfg(target_arch = "x86")]
-const PTR_SIZE : usize = 4;
-#[cfg(target_arch = "x86_64")]
-const PTR_SIZE : usize = 8;
 
 const BITMAP_BITS : usize = PTR_SIZE * 8;
 const BITMAP_SIZE : usize = 256 / BITMAP_BITS;
