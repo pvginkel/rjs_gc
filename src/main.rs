@@ -33,6 +33,7 @@ struct MyStruct {
 	c: i32
 }
 
+#[derive(Copy, Clone)]
 struct MyStructWithRef {
 	a: GcPtr<MyStruct>,
 	b: GcPtr<MyStruct>
@@ -48,9 +49,37 @@ struct Types {
 }
 
 fn main() {
+	bench("Arrays", &|| { arrays() });
 	bench("Simple allocs", &|| { simple_allocs() });
 	bench("Large allocs", &|| { large_allocs() });
 	bench("Many allocs", &|| { many_allocs() });
+}
+
+fn arrays() {
+	let (heap, types) = create_heap();
+	
+	let mut array = heap.alloc_array_handle::<MyStructWithRef>(types.ref_id, 10);
+	
+	for i in 0..array.len() {
+		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+		
+		result.a = alloc_struct(&heap, &types, 1, 2, 3);
+		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		
+		array[i] = *result;
+	}
+	
+	print_stats(&heap);
+	
+	heap.gc();
+	
+	print_stats(&heap);
+	
+	for i in 0..array.len() {
+		let item = &array[i];
+		
+		assert_eq!(item.a.a + item.a.b + item.a.c + item.b.a + item.b.b + item.b.c, 21);
+	}
 }
 
 fn create_heap() -> (GcHeap, Types) {

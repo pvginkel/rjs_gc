@@ -5,12 +5,14 @@ const PTR_SIZE : usize = 4;
 #[cfg(target_pointer_width = "64")]
 const PTR_SIZE : usize = 8;
 
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::marker::PhantomData;
 use std::ptr;
 use std::mem;
+use std::mem::size_of;
 use strategy::Strategy;
 use strategy::copying::Copying;
+use libc::c_void;
 
 mod os;
 mod strategy;
@@ -25,23 +27,30 @@ macro_rules! field_offset {
 	}
 }
 
+// TODO: This is an ugnly hack. Consider removing this. This should be replaced
+// with RefCell's. See what the performance is to consider whether we want to
+// remove this.
 unsafe fn as_mut<T>(obj: &T) -> &mut T {
 	&mut *((obj as *const T) as *mut T)
 }
 
 #[inline(always)]
-unsafe fn get_data<'a, T : ?Sized>(ptr: *const libc::c_void) -> &'a T {
-	& *(ptr.offset(mem::size_of::<GcMemHeader>() as isize) as *const T)
+unsafe fn get_data<'a, T : ?Sized>(ptr: *const c_void) -> &'a T {
+	& *(ptr.offset(size_of::<GcMemHeader>() as isize) as *const T)
 }
 
 #[inline(always)]
-unsafe fn get_header_mut<'a>(ptr: *const libc::c_void) -> &'a mut GcMemHeader {
+unsafe fn get_header_mut<'a>(ptr: *const c_void) -> &'a mut GcMemHeader {
 	mem::transmute(ptr)
 }
 
+unsafe fn get_array_size_mut<'a>(ptr: *const c_void) -> &'a mut usize {
+	&mut *(ptr.offset(size_of::<GcMemHeader>() as isize) as *mut usize)
+}
+
 #[inline(always)]
-unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *const libc::c_void) -> &'a mut T {
-	&mut *(ptr.offset(mem::size_of::<GcMemHeader>() as isize) as *mut T)
+unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *const c_void) -> &'a mut T {
+	&mut *(ptr.offset(size_of::<GcMemHeader>() as isize) as *mut T)
 }
 
 pub struct Gc<'a, T: ?Sized> {
@@ -59,31 +68,53 @@ impl<'a, T: ?Sized> Gc<'a, T> {
 	}
 }
 
+impl<'a, T: ?Sized> Clone for Gc<'a, T> {
+	fn clone(&self) -> Gc<'a, T> {
+		let handle = unsafe { as_mut(self.owner) }.handles.add(self.owner.handles.ptrs[self.handle as usize]);
+		
+		Gc {
+			owner: self.owner,
+			handle: handle,
+			_type: PhantomData
+		}
+	}
+}
+
 impl<'a, T: ?Sized> Deref for Gc<'a, T> {
 	type Target = T;
 	
 	fn deref(&self) -> &T {
-		self.owner.handles.deref(self)
+		unsafe { & *(self.owner.handles.deref(self.handle) as *const T) }
 	}
 }
 
 impl<'a, T: ?Sized> DerefMut for Gc<'a, T> {
 	fn deref_mut(&mut self) -> &mut T {
-		self.owner.handles.deref_mut(self)
+		unsafe { &mut *(self.owner.handles.deref(self.handle) as *mut T) }
 	}
 }
 
 impl<'a, T: ?Sized> Drop for Gc<'a, T> {
 	fn drop(&mut self) {
-		unsafe { as_mut(self.owner) }.handles.remove(self);
+		unsafe { as_mut(self.owner) }.handles.remove(self.handle);
 	}
 }
 
-#[derive(Copy, Clone)]
 #[allow(raw_pointer_derive)]
 pub struct GcPtr<T: ?Sized> {
-	ptr: *mut libc::c_void,
+	ptr: *mut c_void,
 	_type: PhantomData<T>
+}
+
+impl<T: ?Sized> Copy for GcPtr<T> { }
+
+impl<T: ?Sized> Clone for GcPtr<T> {
+	fn clone(&self) -> GcPtr<T> {
+		GcPtr {
+			ptr: self.ptr,
+			_type: PhantomData
+		}
+	}
 }
 
 impl<T: ?Sized> Deref for GcPtr<T> {
@@ -97,6 +128,90 @@ impl<T: ?Sized> Deref for GcPtr<T> {
 impl<T: ?Sized> DerefMut for GcPtr<T> {
 	fn deref_mut(&mut self) -> &mut T {
 		unsafe { get_data_mut(self.ptr) }
+	}
+}
+
+pub struct GcVec<'a, T> {
+	owner: &'a GcHeap,
+	handle: u32,
+	_type: PhantomData<T>
+}
+
+impl<'a, T> GcVec<'a, T> {
+	pub fn len(&self) -> usize {
+		unsafe { *(self.ptr() as *const usize) }
+	}
+	
+	pub fn as_ptr(&self) -> GcVecPtr<T> {
+		GcVecPtr {
+			ptr: self.owner.handles.ptrs[self.handle as usize],
+			_type: PhantomData
+		}
+	}
+	
+	unsafe fn ptr(&self) -> *const c_void {
+		self.owner.handles.deref(self.handle)
+	}
+}
+
+impl<'a, T> Index<usize> for GcVec<'a, T> {
+	type Output = T;
+	
+	fn index<'b>(&self, index: usize) -> &'b T {
+		if index >= self.len() {
+			panic!("Index out of bounds");
+		}
+		
+		let offset = size_of::<usize>() + (size_of::<T>() * index);
+		
+		unsafe { & *(self.ptr().offset(offset as isize) as *const T) }
+	}
+}
+
+impl<'a, T> IndexMut<usize> for GcVec<'a, T> {
+	fn index_mut<'b>(&mut self, index: usize) -> &'b mut T {
+		let offset = size_of::<usize>() + (size_of::<T>() * index);
+		
+		unsafe { &mut *(self.ptr().offset(offset as isize) as *mut T) }
+	}
+}
+
+pub struct GcVecPtr<T> {
+	ptr: *mut c_void,
+	_type: PhantomData<T>
+}
+
+impl<T> GcVecPtr<T> {
+	pub fn len(&self) -> usize {
+		unsafe { *(self.ptr.offset(size_of::<GcMemHeader>() as isize) as *const usize) }
+	}
+}
+
+impl<T> Index<usize> for GcVecPtr<T> {
+	type Output = T;
+	
+	fn index<'a>(&self, index: usize) -> &'a T {
+		if index >= self.len() {
+			panic!("Index out of bounds");
+		}
+		
+		let offset =
+			size_of::<GcMemHeader>() +
+			size_of::<usize>() +
+			(size_of::<T>() * index);
+		
+		unsafe { & *(self.ptr.offset(offset as isize) as *const T) }
+	}
+}
+
+impl<T> IndexMut<usize> for GcVecPtr<T> {
+	fn index_mut<'a>(&mut self, index: usize) -> &'a mut T {
+		let offset =
+			size_of::<GcMemHeader>() +
+			size_of::<usize>() +
+			(size_of::<T>() * index);
+		
+		unsafe { &mut *(self.ptr.offset(offset as isize) as *mut T) }
 	}
 }
 
@@ -176,7 +291,7 @@ impl GcTypeLayout {
 		// The bitmap is a bitmap of pointers, so this maps to size / sizeof(ptr).
 		// Assert that the size of the struct does not go over this.
 		
-		assert!(size / mem::size_of::<usize>() <= mem::size_of::<u64>() * 8);
+		assert!(size / size_of::<usize>() <= size_of::<u64>() * 8);
 		
 		let mut bitmap = 0u64;
 		
@@ -186,9 +301,9 @@ impl GcTypeLayout {
 			// size. The bitmap itself is a n u64 so we have 64 bits available,
 			// which means we have room for 64 pointers per index.
 			
-			assert!((ptr % mem::size_of::<usize>()) == 0);
+			assert!((ptr % size_of::<usize>()) == 0);
 			
-			bitmap |= 1u64 << (ptr / mem::size_of::<usize>());
+			bitmap |= 1u64 << (ptr / size_of::<usize>());
 		}
 		
 		GcTypeLayout::Bitmap(bitmap)
@@ -202,7 +317,7 @@ pub enum GcTypeWalk {
 }
 
 struct GcHandles {
-	ptrs: Vec<*mut libc::c_void>,
+	ptrs: Vec<*mut c_void>,
 	free: Vec<u32>
 }
 
@@ -214,7 +329,7 @@ impl GcHandles {
 		}
 	}
 	
-	fn add<'a, T: ?Sized>(&mut self, heap: &'a GcHeap, ptr: *mut libc::c_void) -> Gc<'a, T> {
+	fn add(&mut self, ptr: *mut c_void) -> u32 {
 		let index = if let Some(index) = self.free.pop() {
 			assert_eq!(self.ptrs[index as usize], ptr::null_mut());
 			
@@ -226,24 +341,16 @@ impl GcHandles {
 			index
 		};
 		
-		Gc {
-			owner: heap,
-			handle: index,
-			_type: PhantomData
-		}
+		index
 	}
 	
-	fn remove<T: ?Sized>(&mut self, handle: &Gc<T>) {
-		self.free.push(handle.handle);
-		self.ptrs[handle.handle as usize] = ptr::null_mut();
+	fn remove(&mut self, handle: u32) {
+		self.free.push(handle);
+		self.ptrs[handle as usize] = ptr::null_mut();
 	}
 	
-	fn deref<T: ?Sized>(&self, handle: &Gc<T>) -> &T {
-		unsafe { get_data(self.ptrs[handle.handle as usize]) }
-	}
-	
-	fn deref_mut<T: ?Sized>(&self, handle: &mut Gc<T>) -> &mut T {
-		unsafe { get_data_mut(self.ptrs[handle.handle as usize]) }
+	unsafe fn deref(&self, handle: u32) -> *const c_void {
+		self.ptrs[handle as usize].offset(size_of::<GcMemHeader>() as isize)
 	}
 }
 
@@ -258,15 +365,24 @@ struct GcMemHeader {
 }
 
 impl GcMemHeader {
-	fn new(type_id: GcTypeId) -> GcMemHeader {
+	fn new(type_id: GcTypeId, is_array: bool) -> GcMemHeader {
+		let mut header = type_id.usize() << 1;
+		if is_array {
+			header |= 1;
+		}
+		
 		GcMemHeader {
-			header: type_id.usize()
+			header: header
 		}
 	}
 	
 	#[inline(always)]
 	fn get_type_id(&self) -> GcTypeId {
-		GcTypeId(self.header as u32)
+		GcTypeId((self.header >> 1) as u32)
+	}
+	
+	fn is_array(&self) -> bool {
+		self.header & 1 != 0
 	}
 }
 
@@ -290,20 +406,7 @@ impl GcHeap {
 		&mut self.types
 	}
 	
-	unsafe fn alloc_raw(&mut self, size: usize) -> *mut libc::c_void {
-		/*
-		self.allocs += 1;
-		
-		if self.allocs > MAX_ALLOCS {
-			self.allocs = 0;
-			
-			let time = precise_time_ns();
-			if time - self.last_gc > MAX_TIME {
-				self.gc();
-			}
-		} 
-		*/
-		
+	unsafe fn alloc_raw(&mut self, size: usize) -> *mut c_void {
 		let mut ptr = self.heap.alloc_raw(size);
 		if ptr.is_null() {
 			self.gc();
@@ -319,13 +422,12 @@ impl GcHeap {
 	
 	pub fn alloc<T>(&self, type_id: GcTypeId) -> GcPtr<T> {
 		unsafe {
-			let ty = self.types.get(type_id);
+			let ptr = as_mut(self).alloc_raw(
+				self.types.get(type_id).size +
+				size_of::<GcMemHeader>()
+			);
 			
-			let ptr = as_mut(self).alloc_raw(ty.size + mem::size_of::<GcMemHeader>());
-			
-			let header = GcMemHeader::new(type_id);
-			
-			*get_header_mut(ptr) = header;
+			*get_header_mut(ptr) = GcMemHeader::new(type_id, false);
 			
 			GcPtr {
 				ptr: ptr,
@@ -336,7 +438,42 @@ impl GcHeap {
 	
 	pub fn alloc_handle<T>(&self, type_id: GcTypeId) -> Gc<T> {
 		let pointer = self.alloc::<T>(type_id).ptr;
-		unsafe { as_mut(self) }.handles.add(self, pointer)
+		let index = unsafe { as_mut(self) }.handles.add(pointer);
+		
+		Gc {
+			owner: self,
+			handle: index,
+			_type: PhantomData
+		}
+	}
+	
+	pub fn alloc_array<T>(&self, type_id: GcTypeId, size: usize) -> GcVecPtr<T> {
+		unsafe {
+			let ptr = as_mut(self).alloc_raw(
+				PTR_SIZE +
+				(self.types.get(type_id).size * size) +
+				size_of::<GcMemHeader>()
+			);
+			
+			*get_header_mut(ptr) = GcMemHeader::new(type_id, true);
+			*get_array_size_mut(ptr) = size;
+			
+			GcVecPtr {
+				ptr: ptr,
+				_type: PhantomData
+			}
+		}
+	}
+	
+	pub fn alloc_array_handle<T>(&self, type_id: GcTypeId, size: usize) -> GcVec<T> {
+		let pointer = self.alloc_array::<T>(type_id, size).ptr;
+		let index = unsafe { as_mut(self) }.handles.add(pointer);
+		
+		GcVec {
+			owner: self,
+			handle: index,
+			_type: PhantomData
+		}
 	}
 	
 	pub fn gc(&self) {
@@ -363,7 +500,7 @@ struct RootWalker<'a> {
 }
 
 impl<'a> RootWalker<'a> {
-	fn next(&mut self) -> *const libc::c_void {
+	fn next(&mut self) -> *const c_void {
 		let end = self.handles.ptrs.len();
 		while self.offset < end {
 			let ptr = self.handles.ptrs[self.offset];
@@ -377,7 +514,7 @@ impl<'a> RootWalker<'a> {
 		ptr::null()
 	}
 	
-	fn rewrite(&mut self, ptr: *const libc::c_void) {
-		self.handles.ptrs[self.offset - 1] = ptr as *mut libc::c_void;
+	fn rewrite(&mut self, ptr: *const c_void) {
+		self.handles.ptrs[self.offset - 1] = ptr as *mut c_void;
 	}
 }
