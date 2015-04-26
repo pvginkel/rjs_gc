@@ -4,7 +4,7 @@ extern crate time;
 use super::Strategy;
 use super::super::os::Memory;
 use super::super::{RootWalker, GcTypes, GcType, GcTypeLayout, GcOpts, GcMemHeader, get_header_mut, get_data, PTR_SIZE};
-use libc::c_void;
+use self::libc::c_void;
 use std::ptr;
 use std::mem;
 use std::mem::size_of;

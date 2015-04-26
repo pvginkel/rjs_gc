@@ -2,7 +2,7 @@ pub mod copying;
 
 extern crate libc;
 
-use libc::c_void;
+use self::libc::c_void;
 use super::{RootWalker, GcTypes};
 
 pub trait Strategy {

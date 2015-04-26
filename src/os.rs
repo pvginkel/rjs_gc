@@ -2,7 +2,7 @@
 
 extern crate libc;
 
-use libc::*;
+use self::libc::*;
 use std::ptr;
 
 #[cfg(target_os = "windows")]

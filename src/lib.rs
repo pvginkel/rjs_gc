@@ -1,3 +1,6 @@
+extern crate libc;
+extern crate time;
+
 // We can't use size_of in a static so we use conditional compilation instead.
 
 #[cfg(target_pointer_width = "32")]
@@ -11,15 +14,12 @@ use std::ptr;
 use std::mem;
 use std::mem::size_of;
 use std::cell::RefCell;
-use strategy::Strategy;
-use strategy::copying::Copying;
-use libc::c_void;
+use self::strategy::Strategy;
+use self::strategy::copying::Copying;
+use self::libc::c_void;
 
 mod os;
 mod strategy;
-
-extern crate libc;
-extern crate time;
 
 #[macro_export]
 macro_rules! field_offset {
