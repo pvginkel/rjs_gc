@@ -10,6 +10,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::mem;
 use std::mem::size_of;
+use std::cell::RefCell;
 use strategy::Strategy;
 use strategy::copying::Copying;
 use libc::c_void;
@@ -23,15 +24,8 @@ extern crate time;
 #[macro_export]
 macro_rules! field_offset {
 	( $ty:ty, $ident:ident ) => {
-		unsafe { ((&(& *(std::ptr::null::<$ty>() as *const $ty)).$ident) as *const GcPtr<_>) as usize }
+		unsafe { ((&(& *(std::ptr::null::<$ty>() as *const $ty)).$ident) as *const _) as usize }
 	}
-}
-
-// TODO: This is an ugnly hack. Consider removing this. This should be replaced
-// with RefCell's. See what the performance is to consider whether we want to
-// remove this.
-unsafe fn as_mut<T>(obj: &T) -> &mut T {
-	&mut *((obj as *const T) as *mut T)
 }
 
 #[inline(always)]
@@ -53,62 +47,56 @@ unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *const c_void) -> &'a mut T {
 	&mut *(ptr.offset(size_of::<GcMemHeader>() as isize) as *mut T)
 }
 
-pub struct Gc<'a, T: ?Sized> {
-	owner: &'a GcHeap,
+pub struct Gc<'a, T> {
+	handles: &'a GcHandles,
 	handle: u32,
 	_type: PhantomData<T>
 }
 
-impl<'a, T: ?Sized> Gc<'a, T> {
+impl<'a, T> Gc<'a, T> {
 	pub fn as_ptr(&self) -> GcPtr<T> {
 		GcPtr {
-			ptr: self.owner.handles.ptrs[self.handle as usize],
+			ptr: self.handles.data.borrow().ptrs[self.handle as usize],
 			_type: PhantomData
 		}
 	}
 }
 
-impl<'a, T: ?Sized> Clone for Gc<'a, T> {
+impl<'a, T> Clone for Gc<'a, T> {
 	fn clone(&self) -> Gc<'a, T> {
-		let handle = unsafe { as_mut(self.owner) }.handles.add(self.owner.handles.ptrs[self.handle as usize]);
-		
-		Gc {
-			owner: self.owner,
-			handle: handle,
-			_type: PhantomData
-		}
+		self.handles.clone(self)
 	}
 }
 
-impl<'a, T: ?Sized> Deref for Gc<'a, T> {
+impl<'a, T> Deref for Gc<'a, T> {
 	type Target = T;
 	
 	fn deref(&self) -> &T {
-		unsafe { & *(self.owner.handles.deref(self.handle) as *const T) }
+		unsafe { mem::transmute(self.handles.deref(self.handle)) }
 	}
 }
 
-impl<'a, T: ?Sized> DerefMut for Gc<'a, T> {
+impl<'a, T> DerefMut for Gc<'a, T> {
 	fn deref_mut(&mut self) -> &mut T {
-		unsafe { &mut *(self.owner.handles.deref(self.handle) as *mut T) }
+		unsafe { mem::transmute(self.handles.deref(self.handle)) }
 	}
 }
 
-impl<'a, T: ?Sized> Drop for Gc<'a, T> {
+impl<'a, T> Drop for Gc<'a, T> {
 	fn drop(&mut self) {
-		unsafe { as_mut(self.owner) }.handles.remove(self.handle);
+		self.handles.remove(self.handle);
 	}
 }
 
 #[allow(raw_pointer_derive)]
-pub struct GcPtr<T: ?Sized> {
-	ptr: *mut c_void,
+pub struct GcPtr<T> {
+	ptr: *const c_void,
 	_type: PhantomData<T>
 }
 
-impl<T: ?Sized> Copy for GcPtr<T> { }
+impl<T> Copy for GcPtr<T> { }
 
-impl<T: ?Sized> Clone for GcPtr<T> {
+impl<T> Clone for GcPtr<T> {
 	fn clone(&self) -> GcPtr<T> {
 		GcPtr {
 			ptr: self.ptr,
@@ -117,7 +105,7 @@ impl<T: ?Sized> Clone for GcPtr<T> {
 	}
 }
 
-impl<T: ?Sized> Deref for GcPtr<T> {
+impl<T> Deref for GcPtr<T> {
 	type Target = T;
 	
 	fn deref(&self) -> &T {
@@ -125,32 +113,32 @@ impl<T: ?Sized> Deref for GcPtr<T> {
 	}
 }
 
-impl<T: ?Sized> DerefMut for GcPtr<T> {
+impl<T> DerefMut for GcPtr<T> {
 	fn deref_mut(&mut self) -> &mut T {
 		unsafe { get_data_mut(self.ptr) }
 	}
 }
 
 pub struct GcVec<'a, T> {
-	owner: &'a GcHeap,
+	handles: &'a GcHandles,
 	handle: u32,
 	_type: PhantomData<T>
 }
 
 impl<'a, T> GcVec<'a, T> {
 	pub fn len(&self) -> usize {
-		unsafe { *(self.ptr() as *const usize) }
+		unsafe { *mem::transmute::<*const c_void, *const usize>(self.ptr()) }
 	}
 	
 	pub fn as_ptr(&self) -> GcVecPtr<T> {
 		GcVecPtr {
-			ptr: self.owner.handles.ptrs[self.handle as usize],
+			ptr: self.handles.data.borrow().ptrs[self.handle as usize],
 			_type: PhantomData
 		}
 	}
 	
 	unsafe fn ptr(&self) -> *const c_void {
-		self.owner.handles.deref(self.handle)
+		mem::transmute(self.handles.deref(self.handle))
 	}
 }
 
@@ -177,7 +165,7 @@ impl<'a, T> IndexMut<usize> for GcVec<'a, T> {
 }
 
 pub struct GcVecPtr<T> {
-	ptr: *mut c_void,
+	ptr: *const c_void,
 	_type: PhantomData<T>
 }
 
@@ -317,47 +305,68 @@ pub enum GcTypeWalk {
 }
 
 struct GcHandles {
-	ptrs: Vec<*mut c_void>,
+	data: RefCell<GcHandlesData>
+}
+
+struct GcHandlesData {
+	ptrs: Vec<*const c_void>,
 	free: Vec<u32>
 }
 
 impl GcHandles {
 	fn new() -> GcHandles {
 		GcHandles {
-			ptrs: Vec::new(),
-			free: Vec::new()
+			data: RefCell::new(GcHandlesData {
+				ptrs: Vec::new(),
+				free: Vec::new()
+			})
 		}
 	}
 	
-	fn add(&mut self, ptr: *mut c_void) -> u32 {
-		let index = if let Some(index) = self.free.pop() {
-			assert_eq!(self.ptrs[index as usize], ptr::null_mut());
+	fn add(&self, ptr: *const c_void) -> u32 {
+		let mut data = self.data.borrow_mut();
+		
+		let index = if let Some(index) = data.free.pop() {
+			assert_eq!(data.ptrs[index as usize], ptr::null_mut());
 			
-			self.ptrs[index as usize] = ptr;
+			data.ptrs[index as usize] = ptr;
 			index
 		} else {
-			let index = self.ptrs.len() as u32;
-			self.ptrs.push(ptr);
+			let index = data.ptrs.len() as u32;
+			data.ptrs.push(ptr);
 			index
 		};
 		
 		index
 	}
 	
-	fn remove(&mut self, handle: u32) {
-		self.free.push(handle);
-		self.ptrs[handle as usize] = ptr::null_mut();
+	fn remove(&self, handle: u32) {
+		let mut data = self.data.borrow_mut();
+		
+		data.free.push(handle);
+		data.ptrs[handle as usize] = ptr::null_mut();
+	}
+	
+	fn clone<'a, T>(&self, gc: &Gc<'a, T>) -> Gc<'a, T> {
+		let data = self.data.borrow_mut();
+		let handle = self.add(data.ptrs[gc.handle as usize]);
+		
+		Gc {
+			handles: gc.handles,
+			handle: handle,
+			_type: PhantomData
+		}
 	}
 	
 	unsafe fn deref(&self, handle: u32) -> *const c_void {
-		self.ptrs[handle as usize].offset(size_of::<GcMemHeader>() as isize)
+		self.data.borrow().ptrs[handle as usize].offset(size_of::<GcMemHeader>() as isize)
 	}
 }
 
 pub struct GcHeap {
 	types: GcTypes,
-	handles: GcHandles,
-	heap: Copying
+	handles: Box<GcHandles>,
+	heap: RefCell<Copying>
 }
 
 struct GcMemHeader {
@@ -397,8 +406,8 @@ impl GcHeap {
 		
 		GcHeap {
 			types: GcTypes::new(),
-			handles: GcHandles::new(),
-			heap: Copying::new(opts)
+			handles: Box::new(GcHandles::new()),
+			heap: RefCell::new(Copying::new(opts))
 		}
 	}
 	
@@ -406,12 +415,12 @@ impl GcHeap {
 		&mut self.types
 	}
 	
-	unsafe fn alloc_raw(&mut self, size: usize) -> *mut c_void {
-		let mut ptr = self.heap.alloc_raw(size);
+	unsafe fn alloc_raw(&self, size: usize) -> *mut c_void {
+		let mut ptr = self.heap.borrow_mut().alloc_raw(size);
 		if ptr.is_null() {
 			self.gc();
 			
-			ptr = self.heap.alloc_raw(size);
+			ptr = self.heap.borrow_mut().alloc_raw(size);
 			if ptr.is_null() {
 				panic!("Could not allocate memory after GC");
 			}
@@ -422,7 +431,7 @@ impl GcHeap {
 	
 	pub fn alloc<T>(&self, type_id: GcTypeId) -> GcPtr<T> {
 		unsafe {
-			let ptr = as_mut(self).alloc_raw(
+			let ptr = self.alloc_raw(
 				self.types.get(type_id).size +
 				size_of::<GcMemHeader>()
 			);
@@ -438,10 +447,10 @@ impl GcHeap {
 	
 	pub fn alloc_handle<T>(&self, type_id: GcTypeId) -> Gc<T> {
 		let pointer = self.alloc::<T>(type_id).ptr;
-		let index = unsafe { as_mut(self) }.handles.add(pointer);
+		let index = self.handles.add(pointer);
 		
 		Gc {
-			owner: self,
+			handles: &*self.handles,
 			handle: index,
 			_type: PhantomData
 		}
@@ -449,7 +458,7 @@ impl GcHeap {
 	
 	pub fn alloc_array<T>(&self, type_id: GcTypeId, size: usize) -> GcVecPtr<T> {
 		unsafe {
-			let ptr = as_mut(self).alloc_raw(
+			let ptr = self.alloc_raw(
 				PTR_SIZE +
 				(self.types.get(type_id).size * size) +
 				size_of::<GcMemHeader>()
@@ -467,35 +476,33 @@ impl GcHeap {
 	
 	pub fn alloc_array_handle<T>(&self, type_id: GcTypeId, size: usize) -> GcVec<T> {
 		let pointer = self.alloc_array::<T>(type_id, size).ptr;
-		let index = unsafe { as_mut(self) }.handles.add(pointer);
+		let index = self.handles.add(pointer);
 		
 		GcVec {
-			owner: self,
+			handles: &*self.handles,
 			handle: index,
 			_type: PhantomData
 		}
 	}
 	
 	pub fn gc(&self) {
-		let heap = unsafe { as_mut(self) };
-		
-		heap.heap.gc(&self.types, RootWalker {
-			handles: &mut heap.handles,
+		self.heap.borrow_mut().gc(&self.types, RootWalker {
+			handles: &mut self.handles.data.borrow_mut(),
 			offset: 0
 		});
 	}
 	
 	pub fn mem_allocated(&self) -> usize {
-		self.heap.mem_allocated()
+		self.heap.borrow().mem_allocated()
 	}
 	
 	pub fn mem_used(&self) -> usize {
-		self.heap.mem_used()
+		self.heap.borrow().mem_used()
 	}
 }
 
 struct RootWalker<'a> {
-	handles: &'a mut GcHandles,
+	handles: &'a mut GcHandlesData,
 	offset: usize
 }
 
