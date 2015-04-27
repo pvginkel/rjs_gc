@@ -3,6 +3,7 @@
 #[macro_use]
 extern crate rjs_gc;
 extern crate time;
+extern crate libc;
 
 use rjs_gc::*;
 use std::mem;
@@ -39,16 +40,23 @@ struct MyStructWithRef {
 	b: GcPtr<MyStruct>
 }
 
+struct MyMaybeRef {
+	is_ref: bool,
+	value: usize
+}
+
 fn print_stats(heap: &GcHeap) { 
 	println!("STATS: allocated {}, used {}", heap.mem_allocated(), heap.mem_used());
 }
 
 struct Types {
 	id: GcTypeId,
-	ref_id: GcTypeId
+	ref_id: GcTypeId,
+	callback_id: GcTypeId
 }
 
 fn main() {
+	bench("Callback type", &|| { callback_type() });
 	bench("Arrays", &|| { arrays() });
 	bench("Simple allocs", &|| { simple_allocs() });
 	bench("Large allocs", &|| { large_allocs() });
@@ -95,7 +103,8 @@ fn create_heap() -> (GcHeap, Types) {
 	
 	let types = Types {
 		id: heap.types().add(GcType::new(mem::size_of::<MyStruct>(), GcTypeLayout::None)),
-		ref_id: heap.types().add(GcType::new(mem::size_of::<MyStructWithRef>(), ref_bitmap))
+		ref_id: heap.types().add(GcType::new(mem::size_of::<MyStructWithRef>(), ref_bitmap)),
+		callback_id: heap.types().add(GcType::new(mem::size_of::<MyMaybeRef>(), GcTypeLayout::Callback(Box::new(callback_walker))))
 	};
 	
 	(heap, types)
@@ -250,4 +259,56 @@ fn many_allocs() {
 	heap.gc();
 	
 	print_stats(&heap);
+}
+
+fn callback_type() {
+	let (heap, types) = create_heap();
+	
+	{
+		// Test without reference.
+		
+		let mut result = heap.alloc_handle(types.callback_id);
+		
+		*result = MyMaybeRef {
+			is_ref: false,
+			value: 0
+		};
+		
+		heap.gc();
+		
+		print_stats(&heap);
+	}
+	
+	{
+		// Test with reference.
+		
+		let mut result = heap.alloc_handle(types.callback_id);
+		
+		*result = MyMaybeRef {
+			is_ref: true,
+			value: unsafe { alloc_struct(&heap, &types, 1, 2, 3).usize() }
+		};
+		
+		heap.gc();
+		
+		print_stats(&heap);
+		
+		let value : GcPtr<MyStruct> = unsafe { GcPtr::from_usize(result.value) };
+		let my_struct = &*value;
+		
+		assert_eq!(1 + 2 + 3, my_struct.a + my_struct.b + my_struct.c);
+	}
+}
+
+fn callback_walker(ptr: *const libc::c_void, index: u32) -> GcTypeWalk {
+	match index {
+		0 => GcTypeWalk::Skip,
+		1 => {
+			// The boolean at the start indicates whether this is a reference.
+			
+			let is_ref = unsafe { *mem::transmute::<_, &bool>(ptr) };
+			if is_ref { GcTypeWalk::Pointer } else { GcTypeWalk::Skip }
+		}
+		_ => GcTypeWalk::End
+	}
 }

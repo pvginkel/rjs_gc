@@ -3,7 +3,7 @@ extern crate time;
 
 use super::Strategy;
 use super::super::os::Memory;
-use super::super::{RootWalker, GcTypes, GcType, GcTypeLayout, GcOpts, GcMemHeader, get_header_mut, get_data, PTR_SIZE};
+use super::super::{RootWalker, GcTypes, GcType, GcTypeLayout, GcTypeWalk, GcOpts, GcMemHeader, get_header_mut, get_data, PTR_SIZE};
 use self::libc::c_void;
 use std::ptr;
 use std::mem;
@@ -213,7 +213,26 @@ unsafe fn process_block(ptr: *const c_void, ty: &GcType, forwarder: &mut Forward
 				offset = offset.offset(1);
 			}
 		}
-		_ => panic!()
+		GcTypeLayout::Callback(ref callback) => {
+			let mut index = 0;
+
+			loop {
+				match callback(ptr, index) {
+					GcTypeWalk::End => break,
+					GcTypeWalk::Skip => {},
+					GcTypeWalk::Pointer => {
+						let offset = (ptr as *mut *const c_void).offset(index as isize);
+						let child = *offset;
+						
+						if !child.is_null() {
+							*offset = forwarder.forward(child);
+						}
+					}
+				}
+				
+				index += 1;
+			}
+		}
 	}
 }
 

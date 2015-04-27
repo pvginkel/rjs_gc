@@ -14,6 +14,7 @@ use std::ptr;
 use std::mem;
 use std::mem::size_of;
 use std::cell::RefCell;
+use std::slice;
 use self::strategy::Strategy;
 use self::strategy::copying::Copying;
 use self::libc::c_void;
@@ -47,16 +48,66 @@ unsafe fn get_data_mut<'a, T : ?Sized>(ptr: *const c_void) -> &'a mut T {
 	&mut *(ptr.offset(size_of::<GcMemHeader>() as isize) as *mut T)
 }
 
+#[derive(Copy, Clone)]
+pub struct GcRoot(u32);
+
+impl GcRoot {
+	fn u32(&self) -> u32 {
+		let GcRoot(index) = *self;
+		index
+	}
+	
+	pub unsafe fn as_handle<'a, T>(self, heap: &'a GcHeap) -> Gc<'a, T> {
+		Gc {
+			handles: &*heap.handles,
+			handle: self,
+			_type: PhantomData
+		}
+	}
+	
+	pub unsafe fn as_new_handle<'a, T>(self, heap: &'a GcHeap) -> Gc<'a, T> {
+		Gc {
+			handles: &*heap.handles,
+			handle: heap.handles.clone_root(self),
+			_type: PhantomData
+		}
+	}
+	
+	pub unsafe fn as_vec_handle<'a, T>(self, heap: &'a GcHeap) -> GcVec<'a, T> {
+		GcVec {
+			handles: &*heap.handles,
+			handle: self,
+			_type: PhantomData
+		}
+	}
+	
+	pub unsafe fn as_new_vec_handle<'a, T>(self, heap: &'a GcHeap) -> GcVec<'a, T> {
+		GcVec {
+			handles: &*heap.handles,
+			handle: heap.handles.clone_root(self),
+			_type: PhantomData
+		}
+	}
+	
+	pub unsafe fn deref<T>(self, heap: &GcHeap) -> &T {
+		mem::transmute((&*heap.handles).deref(self))
+	}
+	
+	pub unsafe fn deref_mut<T>(self, heap: &GcHeap) -> &mut T {
+		mem::transmute((&*heap.handles).deref(self))
+	}
+}
+
 pub struct Gc<'a, T> {
 	handles: &'a GcHandles,
-	handle: u32,
+	handle: GcRoot,
 	_type: PhantomData<T>
 }
 
 impl<'a, T> Gc<'a, T> {
 	pub fn as_ptr(&self) -> GcPtr<T> {
 		GcPtr {
-			ptr: self.handles.data.borrow().ptrs[self.handle as usize],
+			ptr: self.handles.data.borrow().ptrs[self.handle.u32() as usize],
 			_type: PhantomData
 		}
 	}
@@ -94,6 +145,19 @@ pub struct GcPtr<T> {
 	_type: PhantomData<T>
 }
 
+impl<T> GcPtr<T> {
+	pub unsafe fn usize(&self) -> usize {
+		self.ptr as usize
+	}
+	
+	pub unsafe fn from_usize(ptr: usize) -> GcPtr<T> {
+		GcPtr {
+			ptr: ptr as *const c_void,
+			_type: PhantomData
+		}
+	}
+}
+
 impl<T> Copy for GcPtr<T> { }
 
 impl<T> Clone for GcPtr<T> {
@@ -121,7 +185,7 @@ impl<T> DerefMut for GcPtr<T> {
 
 pub struct GcVec<'a, T> {
 	handles: &'a GcHandles,
-	handle: u32,
+	handle: GcRoot,
 	_type: PhantomData<T>
 }
 
@@ -132,7 +196,7 @@ impl<'a, T> GcVec<'a, T> {
 	
 	pub fn as_ptr(&self) -> GcVecPtr<T> {
 		GcVecPtr {
-			ptr: self.handles.data.borrow().ptrs[self.handle as usize],
+			ptr: self.handles.data.borrow().ptrs[self.handle.u32() as usize],
 			_type: PhantomData
 		}
 	}
@@ -164,14 +228,53 @@ impl<'a, T> IndexMut<usize> for GcVec<'a, T> {
 	}
 }
 
+#[allow(raw_pointer_derive)]
 pub struct GcVecPtr<T> {
 	ptr: *const c_void,
 	_type: PhantomData<T>
 }
 
 impl<T> GcVecPtr<T> {
+	pub unsafe fn usize(&self) -> usize {
+		self.ptr as usize
+	}
+	
+	pub unsafe fn from_usize(ptr: usize) -> GcVecPtr<T> {
+		GcVecPtr {
+			ptr: ptr as *const c_void,
+			_type: PhantomData
+		}
+	}
+}
+
+impl<T> Copy for GcVecPtr<T> { }
+
+impl<T> Clone for GcVecPtr<T> {
+	fn clone(&self) -> GcVecPtr<T> {
+		GcVecPtr {
+			ptr: self.ptr,
+			_type: PhantomData
+		}
+	}
+}
+
+impl<T> GcVecPtr<T> {
 	pub fn len(&self) -> usize {
 		unsafe { *(self.ptr.offset(size_of::<GcMemHeader>() as isize) as *const usize) }
+	}
+	
+	pub unsafe fn as_slice(&self) -> &[T] {
+		slice::from_raw_parts(
+			self.ptr.offset((size_of::<GcMemHeader>() + size_of::<usize>()) as isize) as *const T,
+			self.len()
+		)
+	}
+	
+	pub unsafe fn as_slice_mut(&self) -> &mut [T] {
+		slice::from_raw_parts_mut(
+			self.ptr.offset((size_of::<GcMemHeader>() + size_of::<usize>()) as isize) as *mut T,
+			self.len()
+		)
 	}
 }
 
@@ -270,7 +373,7 @@ impl GcType {
 pub enum GcTypeLayout {
 	None,
 	Bitmap(u64),
-	Callback(Box<Fn(usize, u32) -> GcTypeWalk>)
+	Callback(Box<Fn(*const c_void, u32) -> GcTypeWalk>)
 }
 
 impl GcTypeLayout {
@@ -323,7 +426,7 @@ impl GcHandles {
 		}
 	}
 	
-	fn add(&self, ptr: *const c_void) -> u32 {
+	fn add(&self, ptr: *const c_void) -> GcRoot {
 		let mut data = self.data.borrow_mut();
 		
 		let index = if let Some(index) = data.free.pop() {
@@ -337,19 +440,24 @@ impl GcHandles {
 			index
 		};
 		
-		index
+		GcRoot(index)
 	}
 	
-	fn remove(&self, handle: u32) {
+	fn remove(&self, handle: GcRoot) {
 		let mut data = self.data.borrow_mut();
 		
-		data.free.push(handle);
-		data.ptrs[handle as usize] = ptr::null_mut();
+		data.free.push(handle.u32());
+		data.ptrs[handle.u32() as usize] = ptr::null_mut();
+	}
+	
+	fn clone_root(&self, handle: GcRoot) -> GcRoot {
+		let data = self.data.borrow_mut();
+		self.add(data.ptrs[handle.u32() as usize])
 	}
 	
 	fn clone<'a, T>(&self, gc: &Gc<'a, T>) -> Gc<'a, T> {
 		let data = self.data.borrow_mut();
-		let handle = self.add(data.ptrs[gc.handle as usize]);
+		let handle = self.add(data.ptrs[gc.handle.u32() as usize]);
 		
 		Gc {
 			handles: gc.handles,
@@ -358,8 +466,8 @@ impl GcHandles {
 		}
 	}
 	
-	unsafe fn deref(&self, handle: u32) -> *const c_void {
-		self.data.borrow().ptrs[handle as usize].offset(size_of::<GcMemHeader>() as isize)
+	unsafe fn deref(&self, handle: GcRoot) -> *const c_void {
+		self.data.borrow().ptrs[handle.u32() as usize].offset(size_of::<GcMemHeader>() as isize)
 	}
 }
 
@@ -445,15 +553,12 @@ impl GcHeap {
 		}
 	}
 	
+	pub unsafe fn alloc_root<T>(&self, type_id: GcTypeId) -> GcRoot {
+		self.handles.add(self.alloc::<T>(type_id).ptr)
+	}
+	
 	pub fn alloc_handle<T>(&self, type_id: GcTypeId) -> Gc<T> {
-		let pointer = self.alloc::<T>(type_id).ptr;
-		let index = self.handles.add(pointer);
-		
-		Gc {
-			handles: &*self.handles,
-			handle: index,
-			_type: PhantomData
-		}
+		unsafe { self.alloc_root::<T>(type_id).as_handle(self) }
 	}
 	
 	pub fn alloc_array<T>(&self, type_id: GcTypeId, size: usize) -> GcVecPtr<T> {
@@ -474,15 +579,12 @@ impl GcHeap {
 		}
 	}
 	
+	pub unsafe fn alloc_array_root<T>(&self, type_id: GcTypeId, size: usize) -> GcRoot {
+		self.handles.add(self.alloc_array::<T>(type_id, size).ptr)
+	}
+	
 	pub fn alloc_array_handle<T>(&self, type_id: GcTypeId, size: usize) -> GcVec<T> {
-		let pointer = self.alloc_array::<T>(type_id, size).ptr;
-		let index = self.handles.add(pointer);
-		
-		GcVec {
-			handles: &*self.handles,
-			handle: index,
-			_type: PhantomData
-		}
+		unsafe { self.alloc_array_root::<T>(type_id, size).as_vec_handle(self) }
 	}
 	
 	pub fn gc(&self) {
