@@ -26,45 +26,107 @@ macro_rules! field_offset {
 	}
 }
 
-pub struct Root<'a, T> {
-	handles: &'a RootHandles,
+pub struct Root<'a, T: 'a> {
+	root: UnsafeRoot<T>,
+	_type: PhantomData<&'a T>
+}
+
+impl<'a, T: 'a> Root<'a, T> {
+	fn from_raw_parts(heap: &'a GcHeap, ptr: *const c_void) -> Root<'a, T> {
+		Root {
+			root: UnsafeRoot::from_raw_parts(heap, ptr),
+			_type: PhantomData
+		}
+	}
+	
+	pub fn from_local(heap: &'a GcHeap, local: Local<T>) -> Root<'a, T> {
+		Root::from_raw_parts(heap, unsafe { (*local.handle).ptr })
+	}
+	
+	pub fn into_unsafe(self) -> UnsafeRoot<T> {
+		self.root
+	}
+	
+	pub fn from_unsafe(_heap: &'a GcHeap, root: UnsafeRoot<T>) -> Root<'a, T> {
+		Root {
+			root: root,
+			_type: PhantomData
+		}
+	}
+}
+
+pub struct UnsafeRoot<T> {
+	handles: *const RootHandles,
 	handle: u32,
 	_type: PhantomData<T>
+}
+
+impl<T> UnsafeRoot<T> {
+	fn from_raw_parts(heap: &GcHeap, ptr: *const c_void) -> UnsafeRoot<T> {
+		UnsafeRoot {
+			handles: &*heap.handles as *const RootHandles,
+			handle: heap.handles.add(ptr),
+			_type: PhantomData
+		}
+	}
+}
+
+impl<T> Deref for UnsafeRoot<T> {
+	type Target = T;
+	
+	fn deref(&self) -> &T {
+		unsafe {
+			let ptr = (*self.handles).get_target(self.handle);
+			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
+		}
+	}
+}
+
+impl<T> DerefMut for UnsafeRoot<T> {
+	fn deref_mut(&mut self) -> &mut T {
+		unsafe {
+			let ptr = (*self.handles).get_target(self.handle);
+			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
+		}
+	}
+}
+
+impl<T> Clone for UnsafeRoot<T> {
+	fn clone(&self) -> UnsafeRoot<T> {
+		UnsafeRoot {
+			handles: self.handles,
+			handle: unsafe { (&*self.handles) }.clone_root(self.handle),
+			_type: PhantomData
+		}
+	}
+}
+
+impl<T> Drop for UnsafeRoot<T> {
+	fn drop(&mut self) {
+		unsafe { (&*self.handles) }.remove(self.handle);
+	}
 }
 
 impl<'a, T> Deref for Root<'a, T> {
 	type Target = T;
 	
 	fn deref(&self) -> &T {
-		unsafe {
-			let ptr = self.handles.get_target(self.handle);
-			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
-		}
+		&*self.root
 	}
 }
 
 impl<'a, T> DerefMut for Root<'a, T> {
 	fn deref_mut(&mut self) -> &mut T {
-		unsafe {
-			let ptr = self.handles.get_target(self.handle);
-			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
-		}
+		&mut *self.root
 	}
 }
 
 impl<'a, T> Clone for Root<'a, T> {
 	fn clone(&self) -> Root<'a, T> {
 		Root {
-			handles: self.handles,
-			handle: self.handles.clone_root(self.handle),
+			root: self.root.clone(),
 			_type: PhantomData
 		}
-	}
-}
-
-impl<'a, T> Drop for Root<'a, T> {
-	fn drop(&mut self) {
-		self.handles.remove(self.handle);
 	}
 }
 
@@ -72,6 +134,20 @@ pub struct ArrayRoot<'a, T> {
 	handles: &'a RootHandles,
 	handle: u32,
 	_type: PhantomData<T>
+}
+
+impl<'a, T> ArrayRoot<'a, T> {
+	fn from_raw_parts(heap: &'a GcHeap, ptr: *const c_void) -> ArrayRoot<'a, T> {
+		ArrayRoot {
+			handles: &heap.handles,
+			handle: heap.handles.add(ptr),
+			_type: PhantomData
+		}
+	}
+	
+	pub fn from_local(heap: &'a GcHeap, local: ArrayLocal<T>) -> ArrayRoot<'a, T> {
+		ArrayRoot::from_raw_parts(heap, unsafe { (*local.handle).ptr })
+	}
 }
 
 impl<'a, T> Deref for ArrayRoot<'a, T> {
@@ -458,6 +534,7 @@ impl RootHandles {
 		data.free.push(handle);
 		let ptr = data.ptrs[handle as usize];
 		data.ptrs[handle as usize] = ptr::null();
+		
 		ptr
 	}
 	
@@ -551,11 +628,7 @@ impl GcHeap {
 	}
 	
 	pub fn alloc_root<T>(&self, type_id: GcTypeId) -> Root<T> {
-		Root {
-			handles: &self.handles,
-			handle: self.handles.add(unsafe { self.alloc::<T>(type_id).ptr }),
-			_type: PhantomData
-		}
+		Root::from_raw_parts(self, unsafe { self.alloc::<T>(type_id).ptr })
 	}
 	
 	fn alloc_local<T>(&self, scope: &LocalScope, type_id: GcTypeId) -> Local<T> {
@@ -567,11 +640,7 @@ impl GcHeap {
 	}
 	
 	pub fn alloc_array_root<T>(&self, type_id: GcTypeId, size: usize) -> ArrayRoot<T> {
-		ArrayRoot {
-			handles: &self.handles,
-			handle: self.handles.add(unsafe { self.alloc_array::<T>(type_id, size).ptr }),
-			_type: PhantomData
-		}
+		ArrayRoot::from_raw_parts(self, unsafe { self.alloc_array::<T>(type_id, size).ptr })
 	}
 	
 	fn alloc_array_local<T>(&self, scope: &LocalScope, type_id: GcTypeId, size: usize) -> ArrayLocal<T> {

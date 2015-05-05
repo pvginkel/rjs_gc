@@ -57,10 +57,42 @@ struct Types {
 }
 
 fn main() {
+	bench("Integrity", &|| { integrity() });
 	bench("Callback type", &|| { callback_type() });
 	bench("Arrays", &|| { arrays() });
 	bench("Large allocs", &|| { large_allocs() });
 	bench("Many allocs", &|| { many_allocs() });
+}
+
+fn integrity() {
+	let (heap, types) = create_heap();
+	
+	let item = {
+		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
+			
+		result.a = alloc_struct(&heap, &types, 1, 2, 3);
+		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		
+		result.into_unsafe()
+	};
+	
+	print_stats(&heap);
+	
+	heap.gc();
+	
+	print_stats(&heap);
+	
+	assert_eq!(item.a.a + item.a.b + item.a.c + item.b.a + item.b.b + item.b.c, 21);
+	
+	let item = Root::from_unsafe(&heap, item);
+	
+	print_stats(&heap);
+	
+	heap.gc();
+	
+	print_stats(&heap);
+	
+	assert_eq!(item.a.a + item.a.b + item.a.c + item.b.a + item.b.b + item.b.c, 21);
 }
 
 fn arrays() {
