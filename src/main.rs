@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(raw_pointer_derive)]
 
 #[macro_use]
 extern crate rjs_gc;
@@ -36,8 +37,8 @@ struct MyStruct {
 
 #[derive(Copy, Clone)]
 struct MyStructWithRef {
-	a: GcPtr<MyStruct>,
-	b: GcPtr<MyStruct>
+	a: Ptr<MyStruct>,
+	b: Ptr<MyStruct>
 }
 
 struct MyMaybeRef {
@@ -58,7 +59,6 @@ struct Types {
 fn main() {
 	bench("Callback type", &|| { callback_type() });
 	bench("Arrays", &|| { arrays() });
-	bench("Simple allocs", &|| { simple_allocs() });
 	bench("Large allocs", &|| { large_allocs() });
 	bench("Many allocs", &|| { many_allocs() });
 }
@@ -66,10 +66,10 @@ fn main() {
 fn arrays() {
 	let (heap, types) = create_heap();
 	
-	let mut array = heap.alloc_array_handle::<MyStructWithRef>(types.ref_id, 10);
+	let mut array = heap.alloc_array_root::<MyStructWithRef>(types.ref_id, 10);
 	
 	for i in 0..array.len() {
-		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
 		
 		result.a = alloc_struct(&heap, &types, 1, 2, 3);
 		result.b = alloc_struct(&heap, &types, 4, 5, 6);
@@ -123,52 +123,18 @@ fn bench(msg: &str, callback: &Fn()) {
 	println!("");
 }
 
-fn simple_allocs() {
-	/*
-	let (heap, types) = create_heap();
-	
-	let mut a = heap.alloc_handle(types.id, MyStruct {
-		a: 1,
-		b: 2,
-		c: 3
-	});
-	
-	let mut b = heap.alloc_handle(types.ref_id, MyStructWithRef {
-		a: heap.alloc(types.id, MyStruct {
-			a: 1,
-			b: 2,
-			c: 3
-		}),
-		b: heap.alloc(types.id, MyStruct {
-			a: 1,
-			b: 2,
-			c: 3
-		})
-	});
-	
-	a.a = 7;
-	
-	assert_eq!(b.a.c, 3);
-//	println!("{} {} {}", b.a.a, b.a.b, b.a.c);
-	
-	b.a.b = 42;
-	
-//	println!("{} {} {}", b.a.a, b.a.b, b.a.c);
-	
-	print_stats(&heap);
-	*/
-}
-
-fn alloc_struct(heap: &GcHeap, types: &Types, a: i32, b: i32, c: i32) -> GcPtr<MyStruct> {
-	let mut result = heap.alloc(types.id);
-	
-	*result = MyStruct {
-		a: a,
-		b: b,
-		c: c
-	};
-	
-	result
+fn alloc_struct(heap: &GcHeap, types: &Types, a: i32, b: i32, c: i32) -> Ptr<MyStruct> {
+	unsafe {
+		let mut result = heap.alloc(types.id);
+		
+		*result = MyStruct {
+			a: a,
+			b: b,
+			c: c
+		};
+		
+		result
+	}
 }
 
 fn large_allocs() {
@@ -177,7 +143,7 @@ fn large_allocs() {
 	let mut small = Vec::new();
 	
 	for _ in 0..400000 {
-		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
 		
 		result.a = alloc_struct(&heap, &types, 1, 2, 3);
 		result.b = alloc_struct(&heap, &types, 4, 5, 6);
@@ -192,23 +158,14 @@ fn large_allocs() {
 	
 //	println!("after init gc");
 //	print_stats(&heap);
-	/*
-	for i in 0..4000 {
-		let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
-		
-		result.a = alloc_struct(&heap, &types, 1, 2, 3);
-		result.b = alloc_struct(&heap, &types, 4, 5, 6);
-		
-		small[i * 10] = result;
-	}
-	*/
+
 	for _ in 0..100 {
 		for i in 0..100 {
 			let mut offset = i;
 			let mut inc = 1;
 			
 			while offset < small.len() {
-				let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+				let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
 			
 				result.a = alloc_struct(&heap, &types, 1, 2, 3);
 				result.b = alloc_struct(&heap, &types, 4, 5, 6);
@@ -248,8 +205,10 @@ fn many_allocs() {
 	for _ in 0..10 {
 		print_stats(&heap);
 		
+		let scope = heap.new_local_scope();
+		
 		for _ in 0..400000 {
-			let mut result = heap.alloc_handle::<MyStructWithRef>(types.ref_id);
+			let mut result = scope.alloc::<MyStructWithRef>(types.ref_id);
 			
 			result.a = alloc_struct(&heap, &types, 1, 2, 3);
 			result.b = alloc_struct(&heap, &types, 4, 5, 6);
@@ -267,7 +226,9 @@ fn callback_type() {
 	{
 		// Test without reference.
 		
-		let mut result = heap.alloc_handle(types.callback_id);
+		let scope = heap.new_local_scope();
+		
+		let mut result = scope.alloc(types.callback_id);
 		
 		*result = MyMaybeRef {
 			is_ref: false,
@@ -282,18 +243,20 @@ fn callback_type() {
 	{
 		// Test with reference.
 		
-		let mut result = heap.alloc_handle(types.callback_id);
+		let scope = heap.new_local_scope();
+		
+		let mut result = scope.alloc(types.callback_id);
 		
 		*result = MyMaybeRef {
 			is_ref: true,
-			value: unsafe { alloc_struct(&heap, &types, 1, 2, 3).usize() }
+			value: alloc_struct(&heap, &types, 1, 2, 3).as_ptr() as usize
 		};
 		
 		heap.gc();
 		
 		print_stats(&heap);
 		
-		let value : GcPtr<MyStruct> = unsafe { GcPtr::from_usize(result.value) };
+		let value : Ptr<MyStruct> = Ptr::from_ptr(result.value as *const libc::c_void);
 		let my_struct = &*value;
 		
 		assert_eq!(1 + 2 + 3, my_struct.a + my_struct.b + my_struct.c);
