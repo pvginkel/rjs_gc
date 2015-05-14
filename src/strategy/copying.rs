@@ -3,7 +3,7 @@ extern crate time;
 
 use super::Strategy;
 use super::super::os::Memory;
-use super::super::{RootWalker, GcTypes, GcType, GcTypeLayout, GcTypeWalk, GcOpts, GcMemHeader};
+use super::super::{RootWalker, GcOpts, GcMemHeader, GcWalker, GcWalk};
 use self::libc::c_void;
 use std::ptr;
 use std::mem;
@@ -86,7 +86,7 @@ impl Copying {
 		}
 	}
 	
-	unsafe fn copy(&mut self, types: &GcTypes, walkers: &mut [Box<RootWalker>]) {
+	unsafe fn copy(&mut self, walkers: &mut [Box<RootWalker>], walker: &GcWalker) {
 		let allocated = self.from.offset;
 		
 		// Calculate the new size of the heap. We use the fill factor of the previous
@@ -155,22 +155,24 @@ impl Copying {
 		while ptr < forwarder.target {
 			let header = Header::from_ptr(ptr);
 			let gc_header = GcMemHeader::from_ptr(ptr);
-			let ty = &types.types[gc_header.get_type_id().usize()];
+			let ty = gc_header.get_type_id();
+			let size = gc_header.get_size();
+			let ptrs = size / size_of::<usize>();
 			
 			if gc_header.is_array() {
 				let count = *mem::transmute::<_, *const usize>(ptr);
 
 				let mut child = ptr.offset(size_of::<usize>() as isize);
-				let end = child.offset((count * ty.size) as isize);
+				let end = child.offset((count * size) as isize);
 
 				while child < end {
-					process_block(child, ty, &mut forwarder);
+					process_block(child, ty, ptrs, &mut forwarder, walker);
 					
-					child = child.offset(ty.size as isize);
+					child = child.offset(size as isize);
 				}
 				
 			} else {
-				process_block(ptr, ty, &mut forwarder);
+				process_block(ptr, ty, ptrs, &mut forwarder, walker);
 			}
 			
 			ptr = ptr.offset(header.size as isize);
@@ -214,41 +216,18 @@ impl Forwarder {
 	}
 }
 
-unsafe fn process_block(ptr: *const c_void, ty: &GcType, forwarder: &mut Forwarder) {
-	match ty.layout {
-		GcTypeLayout::None => {},
-		GcTypeLayout::Bitmap(bitmap) => {
-			let mut offset = ptr as *mut *const c_void;
-			let count = ty.size / size_of::<usize>();
-
-			for i in 0..count {
+unsafe fn process_block(ptr: *const c_void, ty: u32, ptrs: usize, forwarder: &mut Forwarder, walker: &GcWalker) {
+	for i in 0..ptrs {
+		match walker.walk(ty, ptr, i as u32) {
+			GcWalk::End => return,
+			GcWalk::Skip => {},
+			GcWalk::Pointer => {
+				let offset = (ptr as *mut *const c_void).offset(i as isize);
 				let child = *offset;
 				
-				if bitmap & (1 << i) != 0 && !child.is_null() {
+				if !child.is_null() {
 					*offset = forwarder.forward(child);
 				}
-				
-				offset = offset.offset(1);
-			}
-		}
-		GcTypeLayout::Callback(ref callback) => {
-			let mut index = 0;
-
-			loop {
-				match callback(ptr, index) {
-					GcTypeWalk::End => break,
-					GcTypeWalk::Skip => {},
-					GcTypeWalk::Pointer => {
-						let offset = (ptr as *mut *const c_void).offset(index as isize);
-						let child = *offset;
-						
-						if !child.is_null() {
-							*offset = forwarder.forward(child);
-						}
-					}
-				}
-				
-				index += 1;
 			}
 		}
 	}
@@ -278,11 +257,11 @@ impl Strategy for Copying {
 		self.from.offset
 	}
 	
-	fn gc(&mut self, types: &GcTypes, walkers: &mut [Box<RootWalker>]) {
+	fn gc(&mut self, walkers: &mut [Box<RootWalker>], walker: &GcWalker) {
 		let start = time::precise_time_ns();
 		
 		unsafe {
-			self.copy(types, walkers);
+			self.copy(walkers, walker);
 		}
 		
 		let elapsed = (time::precise_time_ns() - start) / 1_000_000;

@@ -9,6 +9,10 @@ extern crate libc;
 use rjs_gc::*;
 use std::mem;
 
+const TYPE_STRUCT   : u32 = 1;
+const TYPE_REF      : u32 = 2;
+const TYPE_CALLBACK : u32 = 3;
+
 struct Stopwatch {
 	started: u64
 }
@@ -50,12 +54,6 @@ fn print_stats(heap: &GcHeap) {
 	println!("STATS: allocated {}, used {}", heap.mem_allocated(), heap.mem_used());
 }
 
-struct Types {
-	id: GcTypeId,
-	ref_id: GcTypeId,
-	callback_id: GcTypeId
-}
-
 fn main() {
 	bench("Integrity", &|| { integrity() });
 	bench("Callback type", &|| { callback_type() });
@@ -65,13 +63,13 @@ fn main() {
 }
 
 fn integrity() {
-	let (heap, types) = create_heap();
+	let heap = create_heap();
 	
 	let item = {
-		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
+		let mut result = heap.alloc_root::<MyStructWithRef>(TYPE_REF);
 			
-		result.a = alloc_struct(&heap, &types, 1, 2, 3);
-		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		result.a = alloc_struct(&heap, 1, 2, 3);
+		result.b = alloc_struct(&heap, 4, 5, 6);
 		
 		result.into_unsafe()
 	};
@@ -96,15 +94,15 @@ fn integrity() {
 }
 
 fn arrays() {
-	let (heap, types) = create_heap();
+	let heap = create_heap();
 	
-	let mut array = heap.alloc_array_root::<MyStructWithRef>(types.ref_id, 10);
+	let mut array = heap.alloc_array_root::<MyStructWithRef>(TYPE_REF, 10);
 	
 	for i in 0..array.len() {
-		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
+		let mut result = heap.alloc_root::<MyStructWithRef>(TYPE_REF);
 		
-		result.a = alloc_struct(&heap, &types, 1, 2, 3);
-		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		result.a = alloc_struct(&heap, 1, 2, 3);
+		result.b = alloc_struct(&heap, 4, 5, 6);
 		
 		array[i] = *result;
 	}
@@ -122,24 +120,38 @@ fn arrays() {
 	}
 }
 
-fn create_heap() -> (GcHeap, Types) {
-	let mut heap = GcHeap::new(GcOpts::default());
-	
-	let ref_bitmap = GcTypeLayout::new_bitmap(
-		mem::size_of::<MyStructWithRef>(),
-		vec![
-			field_offset!(MyStructWithRef, a),
-			field_offset!(MyStructWithRef, b)
-		]
-	);
-	
-	let types = Types {
-		id: heap.types().add(GcType::new(mem::size_of::<MyStruct>(), GcTypeLayout::None)),
-		ref_id: heap.types().add(GcType::new(mem::size_of::<MyStructWithRef>(), ref_bitmap)),
-		callback_id: heap.types().add(GcType::new(mem::size_of::<MyMaybeRef>(), GcTypeLayout::Callback(Box::new(callback_walker))))
-	};
-	
-	(heap, types)
+struct Walker;
+
+impl Walker {
+	fn new() -> Walker {
+		Walker
+	}
+}
+
+impl GcWalker for Walker {
+	fn walk(&self, ty: u32, ptr: *const libc::c_void, index: u32) -> GcWalk {
+		match ty {
+			TYPE_STRUCT => GcWalk::Skip,
+			TYPE_REF => GcWalk::Pointer,
+			TYPE_CALLBACK => {
+				match index {
+					0 => GcWalk::Skip,
+					1 => {
+						// The boolean at the start indicates whether this is a reference.
+						
+						let is_ref = unsafe { *mem::transmute::<_, &bool>(ptr) };
+						if is_ref { GcWalk::Pointer } else { GcWalk::Skip }
+					}
+					_ => GcWalk::End
+				}
+			}
+			_ => panic!("{}", ty)
+		}
+	}
+}
+
+fn create_heap() -> GcHeap {
+	GcHeap::new(Box::new(Walker::new()), GcOpts::default())
 }
 
 fn bench(msg: &str, callback: &Fn()) {
@@ -155,9 +167,9 @@ fn bench(msg: &str, callback: &Fn()) {
 	println!("");
 }
 
-fn alloc_struct(heap: &GcHeap, types: &Types, a: i32, b: i32, c: i32) -> Ptr<MyStruct> {
+fn alloc_struct(heap: &GcHeap, a: i32, b: i32, c: i32) -> Ptr<MyStruct> {
 	unsafe {
-		let mut result = heap.alloc(types.id);
+		let mut result = heap.alloc(TYPE_STRUCT);
 		
 		*result = MyStruct {
 			a: a,
@@ -170,15 +182,15 @@ fn alloc_struct(heap: &GcHeap, types: &Types, a: i32, b: i32, c: i32) -> Ptr<MyS
 }
 
 fn large_allocs() {
-	let (heap, types) = create_heap();
+	let heap = create_heap();
 	
 	let mut small = Vec::new();
 	
 	for _ in 0..400000 {
-		let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
+		let mut result = heap.alloc_root::<MyStructWithRef>(TYPE_REF);
 		
-		result.a = alloc_struct(&heap, &types, 1, 2, 3);
-		result.b = alloc_struct(&heap, &types, 4, 5, 6);
+		result.a = alloc_struct(&heap, 1, 2, 3);
+		result.b = alloc_struct(&heap, 4, 5, 6);
 		
 		small.push(Some(result));
 	}
@@ -197,10 +209,10 @@ fn large_allocs() {
 			let mut inc = 1;
 			
 			while offset < small.len() {
-				let mut result = heap.alloc_root::<MyStructWithRef>(types.ref_id);
+				let mut result = heap.alloc_root::<MyStructWithRef>(TYPE_REF);
 			
-				result.a = alloc_struct(&heap, &types, 1, 2, 3);
-				result.b = alloc_struct(&heap, &types, 4, 5, 6);
+				result.a = alloc_struct(&heap, 1, 2, 3);
+				result.b = alloc_struct(&heap, 4, 5, 6);
 				
 				small[offset] = Some(result);
 				
@@ -232,7 +244,7 @@ fn large_allocs() {
 }
 
 fn many_allocs() {
-	let (heap, types) = create_heap();
+	let heap = create_heap();
 	
 	for _ in 0..10 {
 		print_stats(&heap);
@@ -240,10 +252,10 @@ fn many_allocs() {
 		let _scope = heap.new_local_scope();
 		
 		for _ in 0..400000 {
-			let mut result = heap.alloc_local::<MyStructWithRef>(types.ref_id);
+			let mut result = heap.alloc_local::<MyStructWithRef>(TYPE_REF);
 			
-			result.a = alloc_struct(&heap, &types, 1, 2, 3);
-			result.b = alloc_struct(&heap, &types, 4, 5, 6);
+			result.a = alloc_struct(&heap, 1, 2, 3);
+			result.b = alloc_struct(&heap, 4, 5, 6);
 		}
 	}
 	
@@ -253,14 +265,14 @@ fn many_allocs() {
 }
 
 fn callback_type() {
-	let (heap, types) = create_heap();
+	let heap = create_heap();
 	
 	{
 		// Test without reference.
 		
 		let _scope = heap.new_local_scope();
 		
-		let mut result = heap.alloc_local(types.callback_id);
+		let mut result = heap.alloc_local(TYPE_CALLBACK);
 		
 		*result = MyMaybeRef {
 			is_ref: false,
@@ -277,11 +289,11 @@ fn callback_type() {
 		
 		let _scope = heap.new_local_scope();
 		
-		let mut result = heap.alloc_local(types.callback_id);
+		let mut result = heap.alloc_local(TYPE_CALLBACK);
 		
 		*result = MyMaybeRef {
 			is_ref: true,
-			value: alloc_struct(&heap, &types, 1, 2, 3).as_ptr() as usize
+			value: alloc_struct(&heap, 1, 2, 3).as_ptr() as usize
 		};
 		
 		heap.gc();
@@ -292,18 +304,5 @@ fn callback_type() {
 		let my_struct = &*value;
 		
 		assert_eq!(1 + 2 + 3, my_struct.a + my_struct.b + my_struct.c);
-	}
-}
-
-fn callback_walker(ptr: *const libc::c_void, index: u32) -> GcTypeWalk {
-	match index {
-		0 => GcTypeWalk::Skip,
-		1 => {
-			// The boolean at the start indicates whether this is a reference.
-			
-			let is_ref = unsafe { *mem::transmute::<_, &bool>(ptr) };
-			if is_ref { GcTypeWalk::Pointer } else { GcTypeWalk::Skip }
-		}
-		_ => GcTypeWalk::End
 	}
 }
