@@ -237,10 +237,10 @@ fn many_allocs() {
 	for _ in 0..10 {
 		print_stats(&heap);
 		
-		let scope = heap.new_local_scope();
+		let _scope = heap.new_local_scope();
 		
 		for _ in 0..400000 {
-			let mut result = scope.alloc::<MyStructWithRef>(types.ref_id);
+			let mut result = heap.alloc_local::<MyStructWithRef>(types.ref_id);
 			
 			result.a = alloc_struct(&heap, &types, 1, 2, 3);
 			result.b = alloc_struct(&heap, &types, 4, 5, 6);
@@ -258,9 +258,9 @@ fn callback_type() {
 	{
 		// Test without reference.
 		
-		let scope = heap.new_local_scope();
+		let _scope = heap.new_local_scope();
 		
-		let mut result = scope.alloc(types.callback_id);
+		let mut result = heap.alloc_local(types.callback_id);
 		
 		*result = MyMaybeRef {
 			is_ref: false,
@@ -275,9 +275,9 @@ fn callback_type() {
 	{
 		// Test with reference.
 		
-		let scope = heap.new_local_scope();
+		let _scope = heap.new_local_scope();
 		
-		let mut result = scope.alloc(types.callback_id);
+		let mut result = heap.alloc_local(types.callback_id);
 		
 		*result = MyMaybeRef {
 			is_ref: true,

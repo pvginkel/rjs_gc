@@ -1,3 +1,7 @@
+// TODO: The handles field of UnsafeRoot currently is a Rc. This is not preferable
+// because of performance. However there is a problem. If the field is changed to
+// a *const and the Rc is changed to a Box, a segmentation fault will occur.
+
 const INITIAL_LOCAL_SCOPE_CAPACITY : usize = 8;
 
 extern crate libc;
@@ -12,6 +16,8 @@ use std::slice;
 use self::strategy::Strategy;
 use self::strategy::copying::Copying;
 use self::libc::c_void;
+use std::fmt;
+use std::rc::Rc;
 
 pub mod os;
 mod strategy;
@@ -32,6 +38,10 @@ pub struct Root<'a, T: 'a> {
 }
 
 impl<'a, T: 'a> Root<'a, T> {
+	pub fn as_ptr(&self) -> Ptr<T> {
+		self.root.as_ptr()
+	}
+	
 	fn from_raw_parts(heap: &'a GcHeap, ptr: *const c_void) -> Root<'a, T> {
 		Root {
 			root: UnsafeRoot::from_raw_parts(heap, ptr),
@@ -56,15 +66,19 @@ impl<'a, T: 'a> Root<'a, T> {
 }
 
 pub struct UnsafeRoot<T> {
-	handles: *const RootHandles,
+	handles: Rc<RootHandles>,
 	handle: u32,
 	_type: PhantomData<T>
 }
 
 impl<T> UnsafeRoot<T> {
+	pub fn as_ptr(&self) -> Ptr<T> {
+		unsafe { Ptr::from_ptr(self.handles.get_target(self.handle)) }
+	}
+	
 	fn from_raw_parts(heap: &GcHeap, ptr: *const c_void) -> UnsafeRoot<T> {
 		UnsafeRoot {
-			handles: &*heap.handles as *const RootHandles,
+			handles: heap.handles.clone(),
 			handle: heap.handles.add(ptr),
 			_type: PhantomData
 		}
@@ -76,7 +90,7 @@ impl<T> Deref for UnsafeRoot<T> {
 	
 	fn deref(&self) -> &T {
 		unsafe {
-			let ptr = (*self.handles).get_target(self.handle);
+			let ptr = self.handles.get_target(self.handle);
 			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
 		}
 	}
@@ -84,8 +98,8 @@ impl<T> Deref for UnsafeRoot<T> {
 
 impl<T> DerefMut for UnsafeRoot<T> {
 	fn deref_mut(&mut self) -> &mut T {
-		unsafe {
-			let ptr = (*self.handles).get_target(self.handle);
+		unsafe { 
+			let ptr = self.handles.get_target(self.handle);
 			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
 		}
 	}
@@ -94,8 +108,8 @@ impl<T> DerefMut for UnsafeRoot<T> {
 impl<T> Clone for UnsafeRoot<T> {
 	fn clone(&self) -> UnsafeRoot<T> {
 		UnsafeRoot {
-			handles: self.handles,
-			handle: unsafe { (&*self.handles) }.clone_root(self.handle),
+			handles: self.handles.clone(),
+			handle: self.handles.clone_root(self.handle),
 			_type: PhantomData
 		}
 	}
@@ -103,7 +117,7 @@ impl<T> Clone for UnsafeRoot<T> {
 
 impl<T> Drop for UnsafeRoot<T> {
 	fn drop(&mut self) {
-		unsafe { (&*self.handles) }.remove(self.handle);
+		self.handles.remove(self.handle);
 	}
 }
 
@@ -137,6 +151,12 @@ pub struct ArrayRoot<'a, T> {
 }
 
 impl<'a, T> ArrayRoot<'a, T> {
+	pub fn as_ptr(&self) -> Array<T> {
+		unsafe {
+			Array::from_ptr(self.handles.get_target(self.handle))
+		}
+	}
+	
 	fn from_raw_parts(heap: &'a GcHeap, ptr: *const c_void) -> ArrayRoot<'a, T> {
 		ArrayRoot {
 			handles: &heap.handles,
@@ -198,10 +218,28 @@ impl<'a, T> Drop for ArrayRoot<'a, T> {
 	}
 }
 
-#[derive(Copy, Clone)]
-#[allow(raw_pointer_derive)]
 pub struct Local<T> {
 	handle: *const Ptr<T>
+}
+
+impl<T> Local<T> {
+	pub fn from_ptr(ptr: Ptr<T>, heap: &GcHeap) -> Local<T> {
+		heap.alloc_local_from_ptr(ptr)
+	}
+	
+	pub fn as_ptr(&self) -> Ptr<T> {
+		unsafe { *self.handle }
+	}
+}
+
+impl<T> Copy for Local<T> { }
+
+impl<T> Clone for Local<T> {
+	fn clone(&self) -> Local<T> {
+		Local {
+			handle: self.handle
+		}
+	}
 }
 
 impl<T> Deref for Local<T> {
@@ -218,10 +256,28 @@ impl<T> DerefMut for Local<T> {
 	}
 }
 
-#[derive(Copy, Clone)]
-#[allow(raw_pointer_derive)]
 pub struct ArrayLocal<T> {
 	handle: *const Array<T>
+}
+
+impl<T> ArrayLocal<T> {
+	pub fn from_ptr(ptr: Array<T>, heap: &GcHeap) -> ArrayLocal<T> {
+		heap.alloc_array_local_from_ptr(ptr)
+	}
+	
+	pub fn as_ptr(&self) -> Array<T> {
+		unsafe { *self.handle }
+	}
+}
+
+impl<T> Copy for ArrayLocal<T> { }
+
+impl<T> Clone for ArrayLocal<T> {
+	fn clone(&self) -> ArrayLocal<T> {
+		ArrayLocal {
+			handle: self.handle
+		}
+	}
 }
 
 impl<T> Deref for ArrayLocal<T> {
@@ -238,24 +294,14 @@ impl<T> DerefMut for ArrayLocal<T> {
 	}
 }
 
-pub struct LocalScope<'a> {
-	heap: &'a GcHeap,
+pub struct LocalScope {
+	heap: *const GcHeap,
 	index: usize
 }
 
-impl<'a> LocalScope<'a> {
-	pub fn alloc<T>(&self, type_id: GcTypeId) -> Local<T> {
-		self.heap.alloc_local(self, type_id)
-	}
-	
-	pub fn alloc_array<T>(&self, type_id: GcTypeId, size: usize) -> ArrayLocal<T> {
-		self.heap.alloc_array_local(self, type_id, size)
-	}
-}
-
-impl<'a> Drop for LocalScope<'a> {
+impl Drop for LocalScope {
 	fn drop(&mut self) {
-		self.heap.drop_current_scope(self.index);
+		unsafe { &*self.heap }.drop_current_scope(self.index);
 	}
 }
 
@@ -290,11 +336,15 @@ impl LocalScopeData {
 	}
 }
 
-#[derive(PartialEq, Debug)]
-#[allow(raw_pointer_derive)]
 pub struct Ptr<T> {
 	ptr: *const c_void,
 	_type: PhantomData<T>
+}
+
+impl<T> PartialEq for Ptr<T> {
+	fn eq(&self, other: &Ptr<T>) -> bool {
+		self.ptr == other.ptr
+	}
 }
 
 impl<T> Copy for Ptr<T> { }
@@ -302,6 +352,12 @@ impl<T> Copy for Ptr<T> { }
 impl<T> Clone for Ptr<T> {
 	fn clone(&self) -> Ptr<T> {
 		Self::from_ptr(self.ptr)
+	}
+}
+
+impl<T> fmt::Debug for Ptr<T> {
+	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+		write!(fmt, "Ptr {{ ptr: {:?} }}", self.ptr)
 	}
 }
 
@@ -315,6 +371,14 @@ impl<T> Ptr<T> {
 			ptr: ptr,
 			_type: PhantomData
 		}
+	}
+	
+	pub fn null() -> Ptr<T> {
+		Self::from_ptr(ptr::null())
+	}
+	
+	pub fn is_null(&self) -> bool {
+		self.ptr.is_null()
 	}
 }
 
@@ -332,8 +396,6 @@ impl<T> DerefMut for Ptr<T> {
 	}
 }
 
-#[derive(PartialEq, Debug)]
-#[allow(raw_pointer_derive)]
 pub struct Array<T> {
 	ptr: *const c_void,
 	_type: PhantomData<T>
@@ -347,6 +409,12 @@ impl<T> Clone for Array<T> {
 	}
 }
 
+impl<T> fmt::Debug for Array<T> {
+	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+		write!(fmt, "Ptr {{ ptr: {:?} }}", self.ptr)
+	}
+}
+
 impl<T> Array<T> {
 	pub fn as_ptr(&self) -> *const c_void {
 		self.ptr
@@ -357,6 +425,14 @@ impl<T> Array<T> {
 			ptr: ptr,
 			_type: PhantomData
 		}
+	}
+	
+	pub fn null() -> Array<T> {
+		Self::from_ptr(ptr::null())
+	}
+	
+	pub fn is_null(&self) -> bool {
+		self.ptr.is_null()
 	}
 }
 
@@ -576,7 +652,7 @@ impl GcMemHeader {
 
 pub struct GcHeap {
 	types: GcTypes,
-	handles: Box<RootHandles>,
+	handles: Rc<RootHandles>,
 	heap: RefCell<Copying>,
 	scopes: RefCell<Vec<LocalScopeData>>
 }
@@ -592,7 +668,7 @@ impl GcHeap {
 		
 		GcHeap {
 			types: GcTypes::new(),
-			handles: Box::new(RootHandles::new()),
+			handles: Rc::new(RootHandles::new()),
 			heap: RefCell::new(Copying::new(opts)),
 			scopes: RefCell::new(Vec::new())
 		}
@@ -631,11 +707,19 @@ impl GcHeap {
 		Root::from_raw_parts(self, unsafe { self.alloc::<T>(type_id).ptr })
 	}
 	
-	fn alloc_local<T>(&self, scope: &LocalScope, type_id: GcTypeId) -> Local<T> {
-		let ptr = unsafe { self.alloc::<T>(type_id) };
+	pub fn alloc_local<T>(&self, type_id: GcTypeId) -> Local<T> {
+		self.alloc_local_from_ptr(unsafe { self.alloc::<T>(type_id) })
+	}
+	
+	fn alloc_local_from_ptr<T>(&self, ptr: Ptr<T>) -> Local<T> {
+		let mut scopes = self.scopes.borrow_mut();
+		let len = scopes.len();
+		if len == 0 {
+			panic!("No local scope present");
+		}
 		
 		Local {
-			handle: unsafe { transmute(self.scopes.borrow_mut()[scope.index].add(ptr.ptr)) }
+			handle: unsafe { transmute(scopes[len - 1].add(ptr.ptr)) }
 		}
 	}
 	
@@ -643,11 +727,19 @@ impl GcHeap {
 		ArrayRoot::from_raw_parts(self, unsafe { self.alloc_array::<T>(type_id, size).ptr })
 	}
 	
-	fn alloc_array_local<T>(&self, scope: &LocalScope, type_id: GcTypeId, size: usize) -> ArrayLocal<T> {
-		let ptr = unsafe { self.alloc_array::<T>(type_id, size) };
+	pub fn alloc_array_local<T>(&self, type_id: GcTypeId, size: usize) -> ArrayLocal<T> {
+		self.alloc_array_local_from_ptr(unsafe { self.alloc_array::<T>(type_id, size) })
+	}
+	
+	fn alloc_array_local_from_ptr<T>(&self, ptr: Array<T>) -> ArrayLocal<T> {
+		let mut scopes = self.scopes.borrow_mut();
+		let len = scopes.len();
+		if len == 0 {
+			panic!("No local scope present");
+		}
 		
 		ArrayLocal {
-			handle: unsafe { transmute(self.scopes.borrow_mut()[scope.index].add(ptr.ptr)) }
+			handle: unsafe { transmute(scopes[len - 1].add(ptr.ptr)) }
 		}
 	}
 	
@@ -711,7 +803,7 @@ impl GcHeap {
 		scopes.push(LocalScopeData::new());
 		
 		LocalScope {
-			heap: &self,
+			heap: self as *const GcHeap,
 			index: index
 		}
 	}

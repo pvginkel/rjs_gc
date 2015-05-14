@@ -263,14 +263,14 @@ impl Strategy for Copying {
 	}
 	
 	fn gc(&mut self, types: &GcTypes, walkers: &mut [Box<RootWalker>]) {
-		// let start = time::precise_time_ns();
+		let start = time::precise_time_ns();
 		
 		unsafe {
 			self.copy(types, walkers);
 		}
 		
-		// let elapsed = (time::precise_time_ns() - start) / 1_000_000;
+		let elapsed = (time::precise_time_ns() - start) / 1_000_000;
 
-		// println!("=== GC === allocated {} used {} ms {}", self.mem_allocated(), self.mem_used(), elapsed);
+		println!("=== GC === allocated {} used {} ms {}", self.mem_allocated(), self.mem_used(), elapsed);
 	}
 }
