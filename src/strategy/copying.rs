@@ -23,6 +23,18 @@ impl Header {
 			size: size
 		}
 	}
+	
+	unsafe fn from_ptr<'a>(ptr: *const c_void) -> &'a mut Header {
+		mem::transmute(ptr.offset(-((size_of::<Header>() + size_of::<GcMemHeader>()) as isize)))
+	}
+	
+	unsafe fn offset_from_user(ptr: *const c_void) -> *const c_void {
+		ptr.offset(-((size_of::<Header>() + size_of::<GcMemHeader>()) as isize))
+	}
+	
+	unsafe fn offset_to_user(ptr: *const c_void) -> *const c_void {
+		ptr.offset((size_of::<Header>() + size_of::<GcMemHeader>()) as isize)
+	}
 }
 
 struct Block {
@@ -138,17 +150,17 @@ impl Copying {
 		
 		// Walk the to space.
 		
-		let mut ptr = self.to.ptr().offset(size_of::<Header>() as isize);
+		let mut ptr = Header::offset_to_user(self.to.ptr());
 		
 		while ptr < forwarder.target {
-			let header = &mut *(ptr.offset(-(size_of::<Header>() as isize)) as *mut Header);
-			let gc_header = mem::transmute::<_, &GcMemHeader>(ptr);
+			let header = Header::from_ptr(ptr);
+			let gc_header = GcMemHeader::from_ptr(ptr);
 			let ty = &types.types[gc_header.get_type_id().usize()];
 			
 			if gc_header.is_array() {
-				let count = *mem::transmute::<_, *const usize>(ptr.offset(size_of::<GcMemHeader>() as isize));
+				let count = *mem::transmute::<_, *const usize>(ptr);
 
-				let mut child = ptr.offset((size_of::<GcMemHeader>() + size_of::<usize>()) as isize);
+				let mut child = ptr.offset(size_of::<usize>() as isize);
 				let end = child.offset((count * ty.size) as isize);
 
 				while child < end {
@@ -158,7 +170,7 @@ impl Copying {
 				}
 				
 			} else {
-				process_block(ptr.offset(size_of::<GcMemHeader>() as isize), ty, &mut forwarder);
+				process_block(ptr, ty, &mut forwarder);
 			}
 			
 			ptr = ptr.offset(header.size as isize);
@@ -182,19 +194,23 @@ struct Forwarder {
 
 impl Forwarder {
 	unsafe fn forward(&mut self, ptr: *const c_void) -> *const c_void {
-		let header = &mut *(ptr.offset(-(size_of::<Header>() as isize)) as *mut Header);
+		let header = Header::from_ptr(ptr);
 		
 		if header.forward.is_null() {
 			header.forward = self.target;
 			
 			*(self.target as *mut Header) = Header::new(header.size);
 			
-			ptr::copy(ptr, self.target.offset(size_of::<Header>() as isize), header.size - size_of::<Header>());
+			ptr::copy(
+				Header::offset_from_user(ptr).offset(size_of::<Header>() as isize),
+				self.target.offset(size_of::<Header>() as isize),
+				header.size - size_of::<Header>()
+			);
 			
 			self.target = self.target.offset(header.size as isize);
 		}
 		
-		header.forward.offset(size_of::<Header>() as isize)
+		Header::offset_to_user(header.forward)
 	}
 }
 

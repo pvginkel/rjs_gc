@@ -91,7 +91,7 @@ impl<T> Deref for UnsafeRoot<T> {
 	fn deref(&self) -> &T {
 		unsafe {
 			let ptr = self.handles.get_target(self.handle);
-			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
+			transmute(ptr)
 		}
 	}
 }
@@ -100,7 +100,7 @@ impl<T> DerefMut for UnsafeRoot<T> {
 	fn deref_mut(&mut self) -> &mut T {
 		unsafe { 
 			let ptr = self.handles.get_target(self.handle);
-			transmute(ptr.offset(size_of::<GcMemHeader>() as isize))
+			transmute(ptr)
 		}
 	}
 }
@@ -175,7 +175,7 @@ impl<'a, T> Deref for ArrayRoot<'a, T> {
 	
 	fn deref(&self) -> &[T] {
 		unsafe {
-			let ptr = self.handles.get_target(self.handle).offset(size_of::<GcMemHeader>() as isize);
+			let ptr = self.handles.get_target(self.handle);
 			let size = *transmute::<_, *const usize>(ptr);
 			let ptr = ptr.offset(size_of::<usize>() as isize);
 			
@@ -190,7 +190,7 @@ impl<'a, T> Deref for ArrayRoot<'a, T> {
 impl<'a, T> DerefMut for ArrayRoot<'a, T> {
 	fn deref_mut(&mut self) -> &mut [T] {
 		unsafe {
-			let ptr = self.handles.get_target(self.handle).offset(size_of::<GcMemHeader>() as isize);
+			let ptr = self.handles.get_target(self.handle);
 			let size = *transmute::<_, *const usize>(ptr);
 			let ptr = ptr.offset(size_of::<usize>() as isize);
 			
@@ -386,13 +386,13 @@ impl<T> Deref for Ptr<T> {
 	type Target = T;
 	
 	fn deref(&self) -> &T {
-		unsafe { transmute(self.ptr.offset(size_of::<GcMemHeader>() as isize)) }
+		unsafe { transmute(self.ptr) }
 	}
 }
 
 impl<T> DerefMut for Ptr<T> {
 	fn deref_mut(&mut self) -> &mut T {
-		unsafe { transmute(self.ptr.offset(size_of::<GcMemHeader>() as isize)) }
+		unsafe { transmute(self.ptr) }
 	}
 }
 
@@ -441,9 +441,8 @@ impl<T> Deref for Array<T> {
 	
 	fn deref(&self) -> &[T] {
 		unsafe {
-			let ptr = self.ptr.offset(size_of::<GcMemHeader>() as isize);
-			let size = *transmute::<_, *const usize>(ptr);
-			let ptr = ptr.offset(size_of::<usize>() as isize);
+			let size = *transmute::<_, *const usize>(self.ptr);
+			let ptr = self.ptr.offset(size_of::<usize>() as isize);
 			
 			slice::from_raw_parts(
 				transmute(ptr),
@@ -456,9 +455,8 @@ impl<T> Deref for Array<T> {
 impl<T> DerefMut for Array<T> {
 	fn deref_mut(&mut self) -> &mut [T] {
 		unsafe {
-			let ptr = self.ptr.offset(size_of::<GcMemHeader>() as isize);
-			let size = *transmute::<_, *const usize>(ptr);
-			let ptr = ptr.offset(size_of::<usize>() as isize);
+			let size = *transmute::<_, *const usize>(self.ptr);
+			let ptr = self.ptr.offset(size_of::<usize>() as isize);
 			
 			slice::from_raw_parts_mut(
 				transmute(ptr),
@@ -648,6 +646,10 @@ impl GcMemHeader {
 	fn is_array(&self) -> bool {
 		self.header & 1 != 0
 	}
+	
+	unsafe fn from_ptr<'a>(ptr: *const c_void) -> &'a mut GcMemHeader {
+		transmute(ptr.offset(-(size_of::<GcMemHeader>() as isize)))
+	}
 }
 
 pub struct GcHeap {
@@ -689,7 +691,11 @@ impl GcHeap {
 			}
 		}
 		
-		ptr
+		if ptr.is_null() {
+			ptr
+		} else {
+			ptr.offset(size_of::<GcMemHeader>() as isize)
+		}
 	}
 	
 	pub unsafe fn alloc<T>(&self, type_id: GcTypeId) -> Ptr<T> {
@@ -698,7 +704,7 @@ impl GcHeap {
 			size_of::<GcMemHeader>()
 		);
 		
-		*transmute::<_, *mut GcMemHeader>(ptr) = GcMemHeader::new(type_id, false);
+		*GcMemHeader::from_ptr(ptr) = GcMemHeader::new(type_id, false);
 		
 		Ptr::from_ptr(ptr)
 	}
@@ -750,8 +756,8 @@ impl GcHeap {
 			size_of::<GcMemHeader>()
 		);
 		
-		*transmute::<_, *mut GcMemHeader>(ptr) = GcMemHeader::new(type_id, true);
-		*transmute::<_, *mut usize>(ptr.offset(size_of::<GcMemHeader>() as isize)) = size;
+		*GcMemHeader::from_ptr(ptr) = GcMemHeader::new(type_id, true);
+		*transmute::<_, *mut usize>(ptr) = size;
 		
 		Array::from_ptr(ptr)
 	}
