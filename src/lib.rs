@@ -7,7 +7,7 @@ const INITIAL_LOCAL_SCOPE_CAPACITY : usize = 8;
 extern crate libc;
 extern crate time;
 
-use std::ops::{Deref, DerefMut, Index};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::marker::PhantomData;
 use std::ptr;
 use std::mem::{size_of, transmute, swap};
@@ -434,6 +434,24 @@ impl<T> Array<T> {
 	pub fn is_null(&self) -> bool {
 		self.ptr.is_null()
 	}
+	
+	pub fn len(&self) -> usize {
+		unsafe { *transmute::<_, *const usize>(self.ptr) }
+	}
+}
+
+impl<T: Copy> Array<T> {
+	pub fn copy<'a>(from: &'a Array<T>, to: &'a mut Array<T>, count: usize) {
+		unsafe {
+			assert!(count < from.len() && count < to.len());
+			
+			ptr::copy(
+				from.ptr.offset(size_of::<usize>() as isize),
+				to.ptr.offset(size_of::<usize>() as isize) as *mut c_void,
+				count * size_of::<T>()
+			);
+		}
+	}
 }
 
 impl<T> Deref for Array<T> {
@@ -462,6 +480,36 @@ impl<T> DerefMut for Array<T> {
 				transmute(ptr),
 				size
 			)
+		}
+	}
+}
+
+impl<T> Index<usize> for Array<T> {
+	type Output = T;
+	
+	fn index(&self, index: usize) -> &<Self as Index<usize>>::Output {
+		assert!(index < self.len());
+		
+		unsafe {
+			let ptr = self.ptr.offset(size_of::<usize>() as isize);
+			let ptr = transmute::<_, *const T>(ptr);
+			let ptr = ptr.offset(index as isize);
+			
+			transmute::<_, &T>(ptr)
+		}
+	}
+}
+
+impl<T> IndexMut<usize> for Array<T> {
+	fn index_mut(&mut self, index: usize) -> &mut <Self as Index<usize>>::Output {
+		assert!(index < self.len());
+		
+		unsafe {
+			let ptr = self.ptr.offset(size_of::<usize>() as isize);
+			let ptr = transmute::<_, *const T>(ptr);
+			let ptr = ptr.offset(index as isize);
+			
+			transmute::<_, &mut T>(ptr)
 		}
 	}
 }
