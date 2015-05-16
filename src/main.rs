@@ -71,7 +71,7 @@ fn integrity() {
 		result.a = alloc_struct(&heap, 1, 2, 3);
 		result.b = alloc_struct(&heap, 4, 5, 6);
 		
-		result.into_unsafe()
+		result
 	};
 	
 	print_stats(&heap);
@@ -81,8 +81,6 @@ fn integrity() {
 	print_stats(&heap);
 	
 	assert_eq!(item.a.a + item.a.b + item.a.c + item.b.a + item.b.b + item.b.c, 21);
-	
-	let item = Root::from_unsafe(&heap, item);
 	
 	print_stats(&heap);
 	
