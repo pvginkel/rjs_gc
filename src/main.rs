@@ -291,7 +291,7 @@ fn callback_type() {
 		
 		*result = MyMaybeRef {
 			is_ref: true,
-			value: alloc_struct(&heap, 1, 2, 3).as_ptr() as usize
+			value: alloc_struct(&heap, 1, 2, 3).ptr() as usize
 		};
 		
 		heap.gc();

@@ -26,7 +26,7 @@ impl<T> fmt::Debug for Array<T> {
 }
 
 impl<T> Array<T> {
-	pub fn as_ptr(&self) -> ptr_t {
+	pub fn ptr(&self) -> ptr_t {
 		self.ptr
 	}
 	
@@ -121,5 +121,15 @@ impl<T> IndexMut<usize> for Array<T> {
 			
 			transmute::<_, &mut T>(ptr)
 		}
+	}
+}
+
+pub trait AsArray<T> {
+	fn as_ptr(&self) -> Array<T>;
+}
+
+impl<T> AsArray<T> for Array<T> {
+	fn as_ptr(&self) -> Array<T> {
+		*self
 	}
 }

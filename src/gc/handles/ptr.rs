@@ -31,7 +31,7 @@ impl<T> fmt::Debug for Ptr<T> {
 }
 
 impl<T> Ptr<T> {
-	pub fn as_ptr(&self) -> ptr_t {
+	pub fn ptr(&self) -> ptr_t {
 		self.ptr
 	}
 	
@@ -62,5 +62,15 @@ impl<T> Deref for Ptr<T> {
 impl<T> DerefMut for Ptr<T> {
 	fn deref_mut(&mut self) -> &mut T {
 		unsafe { transmute(self.ptr) }
+	}
+}
+
+pub trait AsPtr<T> {
+	fn as_ptr(&self) -> Ptr<T>;
+}
+
+impl<T> AsPtr<T> for Ptr<T> {
+	fn as_ptr(&self) -> Ptr<T> {
+		*self
 	}
 }

@@ -1,4 +1,4 @@
-use gc::{Ptr, Local, RootHandles, GcHeap, ptr_t};
+use gc::{Ptr, AsPtr, Local, RootHandles, GcHeap};
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::mem::transmute;
@@ -11,20 +11,16 @@ pub struct Root<T> {
 }
 
 impl<T> Root<T> {
-	pub fn as_ptr(&self) -> Ptr<T> {
-		unsafe { Ptr::from_ptr(self.handles.get_target(self.handle)) }
-	}
-	
-	pub unsafe fn from_raw_parts(heap: &GcHeap, ptr: ptr_t) -> Root<T> {
+	pub unsafe fn from_raw_parts<U: AsPtr<T>>(heap: &GcHeap, ptr: U) -> Root<T> {
 		Root {
 			handles: heap.handles.clone(),
-			handle: heap.handles.add(ptr),
+			handle: heap.handles.add(ptr.as_ptr().ptr()),
 			_type: PhantomData
 		}
 	}
 	
 	pub fn from_local(heap: &GcHeap, local: Local<T>) -> Root<T> {
-		unsafe { Root::from_raw_parts(heap, local.as_ptr().as_ptr()) }
+		unsafe { Root::from_raw_parts(heap, local) }
 	}
 }
 
@@ -61,5 +57,11 @@ impl<T> Clone for Root<T> {
 impl<T> Drop for Root<T> {
 	fn drop(&mut self) {
 		self.handles.remove(self.handle);
+	}
+}
+
+impl<T> AsPtr<T> for Root<T> {
+	fn as_ptr(&self) -> Ptr<T> {
+		unsafe { Ptr::from_ptr(self.handles.get_target(self.handle)) }
 	}
 }

@@ -1,4 +1,4 @@
-use gc::{Array, GcHeap};
+use gc::{Array, AsArray, GcHeap};
 use std::ops::{Deref, DerefMut};
 
 pub struct ArrayLocal<T> {
@@ -14,10 +14,6 @@ impl<T> ArrayLocal<T> {
 	
 	pub fn from_ptr(ptr: Array<T>, heap: &GcHeap) -> ArrayLocal<T> {
 		heap.alloc_array_local_from_ptr(ptr)
-	}
-	
-	pub fn as_ptr(&self) -> Array<T> {
-		unsafe { *self.handle }
 	}
 }
 
@@ -42,5 +38,11 @@ impl<T> Deref for ArrayLocal<T> {
 impl<T> DerefMut for ArrayLocal<T> {
 	fn deref_mut(&mut self) -> &mut [T] {
 		unsafe { &mut **(self.handle as *mut Array<T>) }
+	}
+}
+
+impl<T> AsArray<T> for ArrayLocal<T> {
+	fn as_ptr(&self) -> Array<T> {
+		unsafe { *self.handle }
 	}
 }

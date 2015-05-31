@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use self::strategy::Strategy;
 use self::strategy::copying::Copying;
 use std::rc::Rc;
-pub use self::handles::{ArrayLocal, ArrayRoot, Array, Local, Ptr, Root};
+pub use self::handles::{ArrayLocal, ArrayRoot, Array, Local, Ptr, Root, AsPtr, AsArray};
 
 pub mod os;
 mod strategy;
@@ -246,25 +246,25 @@ impl GcHeap {
 	}
 	
 	pub fn alloc_root<T>(&self, ty: u32) -> Root<T> {
-		unsafe { Root::from_raw_parts(self, self.alloc::<T>(ty).as_ptr()) }
+		unsafe { Root::from_raw_parts(self, self.alloc::<T>(ty)) }
 	}
 	
 	pub fn alloc_local<T>(&self, ty: u32) -> Local<T> {
 		self.alloc_local_from_ptr(unsafe { self.alloc::<T>(ty) })
 	}
 	
-	fn alloc_local_from_ptr<T>(&self, ptr: Ptr<T>) -> Local<T> {
+	fn alloc_local_from_ptr<T, U: AsPtr<T>>(&self, ptr: U) -> Local<T> {
 		let mut scopes = self.scopes.borrow_mut();
 		let len = scopes.len();
 		if len == 0 {
 			panic!("no local scope present");
 		}
 		
-		unsafe { Local::new(transmute(scopes[len - 1].add(ptr.as_ptr()))) }
+		unsafe { Local::new(transmute(scopes[len - 1].add(ptr.as_ptr().ptr()))) }
 	}
 	
 	pub fn alloc_array_root<T>(&self, ty: u32, size: usize) -> ArrayRoot<T> {
-		unsafe { ArrayRoot::from_raw_parts(self, self.alloc_array::<T>(ty, size).as_ptr()) }
+		unsafe { ArrayRoot::from_raw_parts(self, self.alloc_array::<T>(ty, size)) }
 	}
 	
 	pub fn alloc_array_local<T>(&self, ty: u32, size: usize) -> ArrayLocal<T> {
@@ -278,7 +278,7 @@ impl GcHeap {
 			panic!("no local scope present");
 		}
 		
-		unsafe { ArrayLocal::new(transmute(scopes[len - 1].add(ptr.as_ptr()))) }
+		unsafe { ArrayLocal::new(transmute(scopes[len - 1].add(ptr.ptr()))) }
 	}
 	
 	pub unsafe fn alloc_array<T>(&self, ty: u32, size: usize) -> Array<T> {

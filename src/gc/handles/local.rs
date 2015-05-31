@@ -1,4 +1,4 @@
-use gc::{Ptr, Root, GcHeap};
+use gc::{Ptr, Root, AsPtr, GcHeap};
 use std::ops::{Deref, DerefMut};
 
 pub struct Local<T> {
@@ -16,12 +16,8 @@ impl<T> Local<T> {
 		Self::from_ptr(root.as_ptr(), heap)
 	}
 	
-	pub fn from_ptr(ptr: Ptr<T>, heap: &GcHeap) -> Local<T> {
+	pub fn from_ptr<U: AsPtr<T>>(ptr: U, heap: &GcHeap) -> Local<T> {
 		heap.alloc_local_from_ptr(ptr)
-	}
-	
-	pub fn as_ptr(&self) -> Ptr<T> {
-		unsafe { *self.handle }
 	}
 }
 
@@ -46,5 +42,11 @@ impl<T> Deref for Local<T> {
 impl<T> DerefMut for Local<T> {
 	fn deref_mut(&mut self) -> &mut T {
 		unsafe { &mut **(self.handle as *mut Ptr<T>) }
+	}
+}
+
+impl<T> AsPtr<T> for Local<T> {
+	fn as_ptr(&self) -> Ptr<T> {
+		unsafe { *self.handle }
 	}
 }
