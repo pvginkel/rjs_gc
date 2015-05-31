@@ -1,4 +1,4 @@
-use gc::{Array, AsArray, GcHeap};
+use gc::{Array, AsArray, GcHeap, ArrayHandle};
 use std::ops::{Deref, DerefMut};
 
 pub struct ArrayLocal<T> {
@@ -46,3 +46,5 @@ impl<T> AsArray<T> for ArrayLocal<T> {
 		unsafe { *self.handle }
 	}
 }
+
+impl<T> ArrayHandle<T> for ArrayLocal<T> {}

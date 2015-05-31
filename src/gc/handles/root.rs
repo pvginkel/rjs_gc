@@ -1,4 +1,4 @@
-use gc::{Ptr, AsPtr, Local, RootHandles, GcHeap};
+use gc::{Ptr, AsPtr, Local, RootHandles, Handle, GcHeap};
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::mem::transmute;
@@ -65,3 +65,5 @@ impl<T> AsPtr<T> for Root<T> {
 		unsafe { Ptr::from_ptr(self.handles.get_target(self.handle)) }
 	}
 }
+
+impl<T> Handle<T> for Root<T> {}

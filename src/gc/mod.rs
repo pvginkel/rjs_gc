@@ -14,7 +14,8 @@ use std::cell::RefCell;
 use self::strategy::Strategy;
 use self::strategy::copying::Copying;
 use std::rc::Rc;
-pub use self::handles::{ArrayLocal, ArrayRoot, Array, Local, Ptr, Root, AsPtr, AsArray};
+pub use self::handles::{ArrayLocal, ArrayRoot, Array, Local, Ptr, Root};
+pub use self::handles::{AsPtr, AsArray, Handle, ArrayHandle};
 
 pub mod os;
 mod strategy;

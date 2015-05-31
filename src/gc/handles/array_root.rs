@@ -1,4 +1,4 @@
-use gc::{Array, ArrayLocal, RootHandles, GcHeap, AsArray, AsPtr};
+use gc::{Array, ArrayLocal, RootHandles, GcHeap, AsArray, AsPtr, ArrayHandle};
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::mem::{size_of, transmute};
@@ -78,3 +78,5 @@ impl<T> AsArray<T> for ArrayRoot<T> {
 		unsafe { Array::from_ptr(self.handles.get_target(self.handle)) }
 	}
 }
+
+impl<T> ArrayHandle<T> for ArrayRoot<T> {}

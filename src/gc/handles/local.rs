@@ -1,4 +1,4 @@
-use gc::{Ptr, Root, AsPtr, GcHeap};
+use gc::{Ptr, Root, AsPtr, GcHeap, Handle};
 use std::ops::{Deref, DerefMut};
 
 pub struct Local<T> {
@@ -50,3 +50,5 @@ impl<T> AsPtr<T> for Local<T> {
 		unsafe { *self.handle }
 	}
 }
+
+impl<T> Handle<T> for Local<T> {}
