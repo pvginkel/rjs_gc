@@ -6,7 +6,7 @@ extern crate rjs_gc;
 extern crate time;
 extern crate libc;
 
-use rjs_gc::*;
+use rjs_gc::gc::*;
 use std::mem;
 
 const TYPE_STRUCT   : u32 = 1;
