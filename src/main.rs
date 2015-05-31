@@ -127,7 +127,7 @@ impl Walker {
 }
 
 impl GcWalker for Walker {
-	fn walk(&self, ty: u32, ptr: *const libc::c_void, index: u32) -> GcWalk {
+	fn walk(&self, ty: u32, ptr: ptr_t, index: u32) -> GcWalk {
 		match ty {
 			TYPE_STRUCT => GcWalk::Skip,
 			TYPE_REF => GcWalk::Pointer,
@@ -298,7 +298,7 @@ fn callback_type() {
 		
 		print_stats(&heap);
 		
-		let value : Ptr<MyStruct> = Ptr::from_ptr(result.value as *const libc::c_void);
+		let value : Ptr<MyStruct> = Ptr::from_ptr(result.value as ptr_t);
 		let my_struct = &*value;
 		
 		assert_eq!(1 + 2 + 3, my_struct.a + my_struct.b + my_struct.c);

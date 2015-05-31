@@ -15,12 +15,14 @@ use std::cell::RefCell;
 use std::slice;
 use self::strategy::Strategy;
 use self::strategy::copying::Copying;
-use self::libc::c_void;
 use std::fmt;
 use std::rc::Rc;
 
 pub mod os;
 mod strategy;
+
+#[allow(non_camel_case_types)] 
+pub type ptr_t = *const u8;
 
 #[macro_export]
 macro_rules! field_offset {
@@ -43,7 +45,7 @@ impl<T> Root<T> {
 		unsafe { Ptr::from_ptr(self.handles.get_target(self.handle)) }
 	}
 	
-	fn from_raw_parts(heap: &GcHeap, ptr: *const c_void) -> Root<T> {
+	fn from_raw_parts(heap: &GcHeap, ptr: ptr_t) -> Root<T> {
 		Root {
 			handles: heap.handles.clone(),
 			handle: heap.handles.add(ptr),
@@ -103,7 +105,7 @@ impl<'a, T> ArrayRoot<T> {
 		unsafe { Array::from_ptr(self.handles.get_target(self.handle)) }
 	}
 	
-	fn from_raw_parts(heap: &'a GcHeap, ptr: *const c_void) -> ArrayRoot<T> {
+	fn from_raw_parts(heap: &'a GcHeap, ptr: ptr_t) -> ArrayRoot<T> {
 		ArrayRoot {
 			handles: heap.handles.clone(),
 			handle: heap.handles.add(ptr),
@@ -256,8 +258,8 @@ impl Drop for LocalScope {
 }
 
 struct LocalScopeData {
-	current: Vec<*const c_void>,
-	handles: Vec<Vec<*const c_void>>
+	current: Vec<ptr_t>,
+	handles: Vec<Vec<ptr_t>>
 }
 
 impl LocalScopeData {
@@ -268,7 +270,7 @@ impl LocalScopeData {
 		}
 	}
 	
-	fn add(&mut self, ptr: *const c_void) -> *const *const c_void {
+	fn add(&mut self, ptr: ptr_t) -> *const ptr_t {
 		if self.current.len() == self.current.capacity() {
 			self.grow();
 		}
@@ -287,7 +289,7 @@ impl LocalScopeData {
 }
 
 pub struct Ptr<T> {
-	ptr: *const c_void,
+	ptr: ptr_t,
 	_type: PhantomData<T>
 }
 
@@ -312,11 +314,11 @@ impl<T> fmt::Debug for Ptr<T> {
 }
 
 impl<T> Ptr<T> {
-	pub fn as_ptr(&self) -> *const c_void {
+	pub fn as_ptr(&self) -> ptr_t {
 		self.ptr
 	}
 	
-	pub fn from_ptr(ptr: *const c_void) -> Ptr<T> {
+	pub fn from_ptr(ptr: ptr_t) -> Ptr<T> {
 		Ptr {
 			ptr: ptr,
 			_type: PhantomData
@@ -347,7 +349,7 @@ impl<T> DerefMut for Ptr<T> {
 }
 
 pub struct Array<T> {
-	ptr: *const c_void,
+	ptr: ptr_t,
 	_type: PhantomData<T>
 }
 
@@ -366,11 +368,11 @@ impl<T> fmt::Debug for Array<T> {
 }
 
 impl<T> Array<T> {
-	pub fn as_ptr(&self) -> *const c_void {
+	pub fn as_ptr(&self) -> ptr_t {
 		self.ptr
 	}
 	
-	pub fn from_ptr(ptr: *const c_void) -> Array<T> {
+	pub fn from_ptr(ptr: ptr_t) -> Array<T> {
 		Array {
 			ptr: ptr,
 			_type: PhantomData
@@ -397,7 +399,7 @@ impl<T: Copy> Array<T> {
 			
 			ptr::copy(
 				from.ptr.offset(size_of::<usize>() as isize),
-				to.ptr.offset(size_of::<usize>() as isize) as *mut c_void,
+				transmute(to.ptr.offset(size_of::<usize>() as isize)),
 				count * size_of::<T>()
 			);
 		}
@@ -485,7 +487,7 @@ struct RootHandles {
 }
 
 struct RootHandlesData {
-	ptrs: Vec<*const c_void>,
+	ptrs: Vec<ptr_t>,
 	free: Vec<u32>
 }
 
@@ -499,7 +501,7 @@ impl RootHandles {
 		}
 	}
 	
-	fn add(&self, ptr: *const c_void) -> u32 {
+	fn add(&self, ptr: ptr_t) -> u32 {
 		let mut data = self.data.borrow_mut();
 		
 		let index = if let Some(index) = data.free.pop() {
@@ -516,7 +518,7 @@ impl RootHandles {
 		index
 	}
 	
-	fn remove(&self, handle: u32) -> *const c_void {
+	fn remove(&self, handle: u32) -> ptr_t {
 		let mut data = self.data.borrow_mut();
 		
 		data.free.push(handle);
@@ -531,7 +533,7 @@ impl RootHandles {
 		self.add(ptr)
 	}
 	
-	unsafe fn get_target(&self, handle: u32) -> *const c_void {
+	unsafe fn get_target(&self, handle: u32) -> ptr_t {
 		let data = &*self.data.borrow();
 		
 		if data.ptrs.len() <= handle as usize {
@@ -574,7 +576,7 @@ impl GcMemHeader {
 		self.header & 1 != 0
 	}
 	
-	unsafe fn from_ptr<'a>(ptr: *const c_void) -> &'a mut GcMemHeader {
+	unsafe fn from_ptr<'a>(ptr: ptr_t) -> &'a mut GcMemHeader {
 		transmute(ptr.offset(-(size_of::<GcMemHeader>() as isize)))
 	}
 }
@@ -603,7 +605,7 @@ impl GcHeap {
 		}
 	}
 	
-	unsafe fn alloc_raw(&self, size: usize) -> *const c_void {
+	unsafe fn alloc_raw(&self, size: usize) -> ptr_t {
 		let mut ptr = self.heap.borrow_mut().alloc_raw(size);
 		if ptr.is_null() {
 			self.gc();
@@ -752,15 +754,15 @@ impl GcHeap {
 }
 
 trait RootWalker {
-	unsafe fn next(&mut self) -> *mut *const c_void;
+	unsafe fn next(&mut self) -> *mut ptr_t;
 }
 struct RootHandlesWalker {
-	ptr: *mut *const c_void,
-	end: *mut *const c_void
+	ptr: *mut ptr_t,
+	end: *mut ptr_t
 }
 
 impl RootWalker for RootHandlesWalker {
-	unsafe fn next(&mut self) -> *mut *const c_void {
+	unsafe fn next(&mut self) -> *mut ptr_t {
 		while self.ptr < self.end {
 			let ptr = self.ptr;
 			self.ptr = self.ptr.offset(1);
@@ -785,7 +787,7 @@ struct LocalScopesWalker {
 }
 
 impl RootWalker for LocalScopesWalker {
-	unsafe fn next(&mut self) -> *mut *const c_void {
+	unsafe fn next(&mut self) -> *mut ptr_t {
 		let scopes = transmute::<_, &[LocalScopeData]>(self.scopes);
 		
 		if self.scope == scopes.len() {
@@ -800,7 +802,7 @@ impl RootWalker for LocalScopesWalker {
 			&scope.handles[self.vec - 1]
 		};
 		
-		let ptr = (*vec).as_ptr().offset(self.index as isize) as *mut *const c_void;
+		let ptr = (*vec).as_ptr().offset(self.index as isize) as *mut ptr_t;
 		
 		self.index += 1;
 		
@@ -819,7 +821,7 @@ impl RootWalker for LocalScopesWalker {
 }
 
 pub trait GcWalker {
-	fn walk(&self, ty: u32, ptr: *const c_void, index: u32) -> GcWalk;
+	fn walk(&self, ty: u32, ptr: ptr_t, index: u32) -> GcWalk;
 }
 
 #[derive(Debug)]
