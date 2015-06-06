@@ -1,4 +1,4 @@
-use gc::{Array, ArrayLocal, RootHandles, GcHeap, AsArray, AsPtr, ArrayHandle};
+use gc::{Array, ArrayLocal, RootHandles, GcHeap, AsArray, AsPtr};
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::mem::{size_of, transmute};
@@ -12,7 +12,7 @@ pub struct ArrayRoot<T> {
 }
 
 impl<'a, T> ArrayRoot<T> {
-	pub unsafe fn from_raw_parts<U: AsArray<T>>(heap: &'a GcHeap, ptr: U) -> ArrayRoot<T> {
+	pub unsafe fn new<U: AsArray<T>>(heap: &'a GcHeap, ptr: U) -> ArrayRoot<T> {
 		ArrayRoot {
 			handles: heap.handles.clone(),
 			handle: heap.handles.add(ptr.as_ptr().ptr()),
@@ -20,8 +20,8 @@ impl<'a, T> ArrayRoot<T> {
 		}
 	}
 	
-	pub fn from_local(heap: &GcHeap, local: ArrayLocal<T>) -> ArrayRoot<T> {
-		unsafe { ArrayRoot::from_raw_parts(heap, local) }
+	pub fn as_local(&self, heap: &GcHeap) -> ArrayLocal<T> {
+		heap.alloc_array_local_from_ptr(self.as_ptr())
 	}
 }
 
@@ -78,5 +78,3 @@ impl<T> AsArray<T> for ArrayRoot<T> {
 		unsafe { Array::from_ptr(self.handles.get_target(self.handle)) }
 	}
 }
-
-impl<T> ArrayHandle<T> for ArrayRoot<T> {}

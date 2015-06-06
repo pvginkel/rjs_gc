@@ -1,4 +1,3 @@
-use std::ops::{Deref, DerefMut};
 pub mod array_local;
 pub mod array_root;
 pub mod array;
@@ -12,6 +11,3 @@ pub use self::array::{Array, AsArray};
 pub use self::local::Local;
 pub use self::ptr::{Ptr, AsPtr};
 pub use self::root::Root;
-
-pub trait Handle<T> : Deref<Target=T> + DerefMut<Target=T> + Clone + AsPtr<T> {}
-pub trait ArrayHandle<T> : Deref<Target=[T]> + DerefMut<Target=[T]> + Clone + AsArray<T> {}
